@@ -170,6 +170,7 @@ async def exoml(
     lead_name: str = "there",
     lead_company: str = "",
     call_context: str = "",
+    prompt_type: str = "sales",
     outbound: str = "false",
 ):
     """
@@ -190,14 +191,15 @@ async def exoml(
         lead_name    = parsed.get("lead_name",    [lead_name])[0]
         lead_company = parsed.get("lead_company", [lead_company])[0]
         call_context = parsed.get("call_context", [call_context])[0]
+        prompt_type  = parsed.get("prompt_type",  [prompt_type])[0]
         outbound     = parsed.get("outbound",     [outbound])[0]
 
     ws_url = PUBLIC_URL.replace("https://", "wss://").replace("http://", "ws://")
     # Max 3 custom params allowed by Exotel Voicebot applet
     ws_url += f"/ws/exotel?lead_name={lead_name}&lead_company={lead_company}&outbound={outbound}"
 
-    # Return plain text wss:// URL — this is what Exotel's dynamic Voicebot method expects
-    return Response(content=ws_url, media_type="text/plain")
+    # Return JSON {"url": "wss://..."} — required by Exotel Voicebot applet dynamic method
+    return JSONResponse({"url": ws_url})
 
 
 # ── Call status callback ──────────────────────────────────────────────────────
@@ -225,6 +227,7 @@ class OutboundCallRequest(BaseModel):
     lead_company: str = ""
     call_context: str = ""
     record: bool = True
+    prompt_type: str = "sales"  # sales, feedback, insurance_only, followup, objection, callback
 
 
 @app.post("/outbound")
@@ -237,6 +240,7 @@ async def trigger_outbound(req: OutboundCallRequest):
             lead_company=req.lead_company,
             call_context=req.call_context,
             record=req.record,
+            prompt_type=req.prompt_type,
         )
         return {"status": "call_placed", "exotel_response": result}
     except Exception as e:
@@ -268,15 +272,17 @@ async def exotel_ws(websocket: WebSocket):
             lead_id = lead["lead_id"]
             initial_info = get_lead_info(lead_id)
     
-    # Get lead name from query params (passed from /exoml endpoint)
+    # Get lead name and prompt_type from query params (passed from /exoml endpoint)
     lead_name = websocket.query_params.get("lead_name", "there")
-    logger.info(f"WebSocket handler initialized for lead: {lead_name}, lead_id: {lead_id}")
+    prompt_type = websocket.query_params.get("prompt_type", "sales")
+    logger.info(f"WebSocket handler initialized for lead: {lead_name}, lead_id: {lead_id}, prompt_type: {prompt_type}")
 
     handler = ExotelCallHandler(
         websocket,
         on_call_end=on_call_end,
         lead_id=lead_id,
         initial_info=initial_info,
+        prompt_type=prompt_type,
     )
     await handler.run()
 

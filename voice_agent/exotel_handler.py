@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 
 class ExotelCallHandler:
-    def __init__(self, websocket, on_call_end=None, lead_id: str = "", initial_info=None):
+    def __init__(self, websocket, on_call_end=None, lead_id: str = "", initial_info=None, prompt_type: str = "sales"):
         self.ws         = websocket
         self.call_sid   = "unknown"
         self.stream_sid = "unknown"
@@ -35,6 +35,7 @@ class ExotelCallHandler:
         self._on_call_end = on_call_end
         self._lead_id     = lead_id
         self._initial_info = initial_info
+        self._prompt_type = prompt_type
 
     async def run(self):
         """Main loop: receive messages from Exotel, dispatch to bridge."""
@@ -93,18 +94,19 @@ class ExotelCallHandler:
         lead_name    = custom.get("lead_name",    "there")
         lead_company = custom.get("lead_company", "") or custom.get("ctx", "")
         call_context = custom.get("call_context", "") or custom.get("ctx", "")
+        prompt_type  = custom.get("prompt_type",  self._prompt_type)
         is_outbound  = custom.get("outbound",     "false").lower() == "true"
 
         logger.info(
             f"[{self.call_sid}] Call started. Lead: {lead_name} @ {lead_company}. "
-            f"Outbound: {is_outbound}"
+            f"Outbound: {is_outbound}, Prompt Type: {prompt_type}"
         )
 
         # Build outbound intro text if needed
         outbound_intro = None
         if is_outbound:
-            from sales_prompt import build_outbound_intro
-            outbound_intro = build_outbound_intro(lead_name)
+            from prompts import build_outbound_intro
+            outbound_intro = build_outbound_intro(lead_name, prompt_type)
 
         # Start Gemini session
         self.bridge = GeminiBridge(
@@ -115,6 +117,7 @@ class ExotelCallHandler:
             call_context=call_context,
             outbound_intro=outbound_intro,
             initial_info=self._initial_info,
+            prompt_type=prompt_type,
         )
         await self.bridge.start()
 
@@ -155,7 +158,7 @@ class ExotelCallHandler:
                 payload = pcm_to_b64(chunk)
                 media_msg = {
                     "event": "media",
-                    "streamSid": self.stream_sid,
+                    "stream_sid": self.stream_sid,
                     "media": {"payload": payload},
                 }
                 await self.ws.send_text(json.dumps(media_msg))

@@ -27,6 +27,7 @@ async def make_outbound_call(
     lead_company: str = "",
     call_context: str = "",
     record: bool = True,
+    prompt_type: str = "sales",
 ) -> dict:
     # Exotel requires 0XXXXXXXXXX format for Indian mobiles, not +91
     if to.startswith("+91"):
@@ -45,6 +46,7 @@ async def make_outbound_call(
         f"?lead_name={lead_name}"
         f"&lead_company={lead_company}"
         f"&call_context={call_context}"
+        f"&prompt_type={prompt_type}"
         f"&outbound=true"
     )
 

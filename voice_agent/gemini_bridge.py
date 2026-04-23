@@ -26,7 +26,7 @@ if "GEMINI_API_KEY" not in globals():
         COMPANY_NAME,
     )
 if "build_system_prompt" not in globals():
-    from sales_prompt import build_system_prompt
+    from prompts import build_system_prompt, PromptType
 if "extract_from_chunk" not in globals():
     from extractor import extract_from_chunk
 if "LeadInfo" not in globals():
@@ -47,6 +47,7 @@ class GeminiBridge:
         call_context: str = "",
         outbound_intro: Optional[str] = None,
         initial_info: Optional[LeadInfo] = None,
+        prompt_type: "PromptType" = "sales",
     ):
         self.call_sid       = call_sid
         self.lead_id        = lead_id
@@ -54,6 +55,7 @@ class GeminiBridge:
         self.lead_company   = lead_company
         self.call_context   = call_context
         self.outbound_intro = outbound_intro
+        self.prompt_type    = prompt_type
 
         # Live collected info — updated as transcript chunks arrive
         self.collected_info: LeadInfo = initial_info or LeadInfo(lead_id=lead_id)
@@ -87,6 +89,7 @@ class GeminiBridge:
 
     async def start(self):
         system_prompt = build_system_prompt(
+            prompt_type=self.prompt_type,
             lead_name=self.lead_name,
             lead_company=self.lead_company,
             call_context=self.call_context,
