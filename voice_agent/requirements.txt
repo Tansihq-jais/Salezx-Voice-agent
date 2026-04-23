@@ -22,3 +22,7 @@ PyMuPDF>=1.23.0
 pymongo>=4.6.0
 # PostgreSQL driver
 psycopg2-binary>=2.9.9
+# SSE streaming
+sse-starlette>=1.6.5
+# Structured logging
+structlog>=24.1.0

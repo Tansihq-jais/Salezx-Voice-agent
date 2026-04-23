@@ -12,9 +12,11 @@ from uuid import uuid4
 
 from campaign_models import Campaign, CampaignStatus, LeadStatus
 import pg_db
+import event_bus
 from outbound import make_outbound_call
 from classifier import classify_and_analyze
-from config import CLIENT_ID
+from config import CLIENT_ID, MIN_CONNECTION_RATE
+from scheduler import CallingWindowChecker
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +56,8 @@ class CampaignOrchestratorPG:
         inter_call_delay_ms: int,
         leads: list,
         original_columns: list[str],
+        calling_window: Optional[dict] = None,
+        min_connection_rate: Optional[float] = None,
     ) -> dict:
         """Validate parameters, reject if a campaign is active, create and persist a new Campaign."""
         if not (1 <= concurrency_limit <= 50):
@@ -85,6 +89,8 @@ class CampaignOrchestratorPG:
             virtual_number=virtual_number,
             inter_call_delay_ms=inter_call_delay_ms,
             original_columns=original_columns,
+            calling_window=calling_window,
+            min_connection_rate=min_connection_rate,
         )
 
         # Insert all contacts
@@ -169,6 +175,11 @@ class CampaignOrchestratorPG:
         
         sem = asyncio.Semaphore(campaign["concurrency_limit"])
         tasks: set[asyncio.Task] = set()
+        _window_checker = CallingWindowChecker()
+
+        # Connection rate tracking
+        _calls_since_check: int = 0
+        _connected_calls: int = 0
 
         def _task_done(t: asyncio.Task) -> None:
             tasks.discard(t)
@@ -179,11 +190,57 @@ class CampaignOrchestratorPG:
             if self._stop_event.is_set():
                 break
             await self._pause_event.wait()
+
+            # Calling window check
+            calling_window = campaign.get("calling_window")
+            if calling_window:
+                tz = calling_window.get("tz", "UTC")
+                start = calling_window.get("start", "00:00")
+                end = calling_window.get("end", "23:59")
+                while not _window_checker.is_within_window(tz, start, end):
+                    wait_secs = _window_checker.get_seconds_until_window_open(tz, start, end)
+                    logger.info(
+                        "Outside calling window [%s–%s %s]; sleeping %.0fs",
+                        start, end, tz, wait_secs,
+                    )
+                    await asyncio.sleep(min(wait_secs, 60))
+                    if self._stop_event.is_set():
+                        break
+                if self._stop_event.is_set():
+                    break
+
             await asyncio.sleep(campaign["inter_call_delay_ms"] / 1000)
             await sem.acquire()
             task = asyncio.create_task(self._dial_lead(lead, sem, campaign))
             tasks.add(task)
             task.add_done_callback(_task_done)
+
+            # Track connection rate every 50 calls
+            _calls_since_check += 1
+            lead_after = pg_db.get_contact(lead["lead_id"])
+            if lead_after and lead_after.get("status") == LeadStatus.COMPLETED.value:
+                _connected_calls += 1
+
+            if _calls_since_check >= 50:
+                connection_rate = _connected_calls / _calls_since_check
+                threshold = campaign.get("min_connection_rate") or MIN_CONNECTION_RATE
+                if connection_rate < threshold:
+                    logger.warning(
+                        "Connection rate %.2f below threshold %.2f — auto-pausing campaign %s",
+                        connection_rate, threshold, self._current_campaign_id,
+                    )
+                    self._pause_event.clear()
+                    pg_db.update_campaign_status(
+                        self._current_campaign_id, CampaignStatus.PAUSED.value
+                    )
+                    event_bus.bus.publish(CLIENT_ID, {
+                        "type": "campaign.auto_paused",
+                        "campaign_id": self._current_campaign_id,
+                        "connection_rate": connection_rate,
+                        "threshold": threshold,
+                    })
+                _calls_since_check = 0
+                _connected_calls = 0
 
         await asyncio.gather(*tasks, return_exceptions=True)
         pg_db.update_campaign_status(
@@ -203,6 +260,11 @@ class CampaignOrchestratorPG:
         self._pause_event.set()
         self._stop_event.clear()
         pg_db.update_campaign_status(self._current_campaign_id, CampaignStatus.RUNNING.value)
+        event_bus.bus.publish(CLIENT_ID, {
+            "type": "campaign.status_changed",
+            "campaign_id": self._current_campaign_id,
+            "status": "Running",
+        })
         self._dispatch_task = asyncio.create_task(self._dispatch_loop())
 
     async def pause(self) -> None:
@@ -211,6 +273,11 @@ class CampaignOrchestratorPG:
             raise ValueError("No active campaign.")
         self._pause_event.clear()
         pg_db.update_campaign_status(self._current_campaign_id, CampaignStatus.PAUSED.value)
+        event_bus.bus.publish(CLIENT_ID, {
+            "type": "campaign.status_changed",
+            "campaign_id": self._current_campaign_id,
+            "status": "Paused",
+        })
 
     async def resume(self) -> None:
         """Resume dispatching after a pause."""
@@ -218,6 +285,11 @@ class CampaignOrchestratorPG:
             raise ValueError("No active campaign.")
         self._pause_event.set()
         pg_db.update_campaign_status(self._current_campaign_id, CampaignStatus.RUNNING.value)
+        event_bus.bus.publish(CLIENT_ID, {
+            "type": "campaign.status_changed",
+            "campaign_id": self._current_campaign_id,
+            "status": "Running",
+        })
 
     async def stop(self) -> None:
         """Stop dispatching, cancel all pending leads."""
@@ -226,6 +298,11 @@ class CampaignOrchestratorPG:
         self._stop_event.set()
         self._pause_event.set()
         pg_db.update_campaign_status(self._current_campaign_id, CampaignStatus.FINISHED.value)
+        event_bus.bus.publish(CLIENT_ID, {
+            "type": "campaign.status_changed",
+            "campaign_id": self._current_campaign_id,
+            "status": "Finished",
+        })
         
         # Mark all still-pending leads as CANCELLED
         pending = pg_db.list_contacts(self._current_campaign_id, status="Pending")
@@ -350,7 +427,7 @@ class CampaignOrchestratorPG:
         lead_id = lead["lead_id"]
         
         # Use LLM-powered analysis
-        classification, summary, _ = await classify_and_analyze(
+        classification, summary, score = await classify_and_analyze(
             transcript=transcript,
             duration=lead["call_duration_seconds"] or 0,
             status=lead["status"] or '',
@@ -372,6 +449,14 @@ class CampaignOrchestratorPG:
                 classification=classification,
                 transcript_summary=summary,
             )
+
+        event_bus.bus.publish(CLIENT_ID, {
+            "type": "lead.call_completed",
+            "lead_id": lead_id,
+            "campaign_id": lead["campaign_id"],
+            "classification": classification,
+            "score": score,
+        })
 
     # ------------------------------------------------------------------
     # get_status helper

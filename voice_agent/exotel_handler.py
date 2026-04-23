@@ -40,9 +40,24 @@ class ExotelCallHandler:
         """Main loop: receive messages from Exotel, dispatch to bridge."""
         try:
             while True:
-                raw = await self.ws.receive_text()
+                try:
+                    data = await self.ws.receive()
+                except RuntimeError:
+                    # WebSocket already disconnected before we could read
+                    logger.info(f"[{self.call_sid}] WebSocket disconnected before receive.")
+                    break
+                if data.get("type") == "websocket.disconnect":
+                    logger.info(f"[{self.call_sid}] Received disconnect frame.")
+                    break
+                if "text" in data:
+                    raw = data["text"]
+                elif "bytes" in data:
+                    raw = data["bytes"].decode("utf-8")
+                else:
+                    continue
                 msg = json.loads(raw)
                 event = msg.get("event", "")
+                logger.info(f"[{self.call_sid}] Event received: {event}")
 
                 if event == "connected":
                     await self._on_connected(msg)
@@ -68,13 +83,16 @@ class ExotelCallHandler:
 
     async def _on_start(self, msg: dict):
         start = msg.get("start", {})
-        self.call_sid   = start.get("callSid",   "unknown")
-        self.stream_sid = start.get("streamSid", "unknown")
-        custom          = start.get("customParameters", {})
+        logger.info(f"START message received: {json.dumps(msg)[:500]}")
+        # Exotel uses snake_case keys in the start message
+        self.call_sid   = start.get("call_sid",   start.get("callSid",   "unknown"))
+        self.stream_sid = start.get("stream_sid", start.get("streamSid", "unknown"))
+        # custom_parameters is the documented key; fall back to customParameters
+        custom = start.get("custom_parameters", start.get("customParameters", {}))
 
         lead_name    = custom.get("lead_name",    "there")
-        lead_company = custom.get("lead_company", "")
-        call_context = custom.get("call_context", "")
+        lead_company = custom.get("lead_company", "") or custom.get("ctx", "")
+        call_context = custom.get("call_context", "") or custom.get("ctx", "")
         is_outbound  = custom.get("outbound",     "false").lower() == "true"
 
         logger.info(

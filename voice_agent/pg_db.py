@@ -287,6 +287,132 @@ def init_db() -> None:
                 CREATE INDEX IF NOT EXISTS idx_call_logs_received_at ON call_logs(received_at DESC);
             """)
 
+            # ── Multi-tenant tables ───────────────────────────────────────────
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS tenants (
+                    tenant_id   VARCHAR(255) PRIMARY KEY,
+                    name        VARCHAR(500) NOT NULL,
+                    plan        VARCHAR(50)  NOT NULL DEFAULT 'starter',
+                    parent_id   VARCHAR(255) REFERENCES tenants(tenant_id),
+                    created_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+                );
+            """)
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS api_keys (
+                    key_id      VARCHAR(255) PRIMARY KEY,
+                    tenant_id   VARCHAR(255) NOT NULL REFERENCES tenants(tenant_id),
+                    key_hash    VARCHAR(255) NOT NULL UNIQUE,
+                    name        VARCHAR(255),
+                    role        VARCHAR(50)  NOT NULL DEFAULT 'manager',
+                    created_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+                    last_used   TIMESTAMPTZ,
+                    revoked     BOOLEAN      NOT NULL DEFAULT FALSE
+                );
+            """)
+
+            # Add role column to api_keys if it doesn't exist (migration)
+            cur.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name='api_keys' AND column_name='role'
+                    ) THEN
+                        ALTER TABLE api_keys ADD COLUMN role VARCHAR(50) NOT NULL DEFAULT 'manager';
+                    END IF;
+                END $$;
+            """)
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS campaign_templates (
+                    template_id         VARCHAR(255) PRIMARY KEY,
+                    tenant_id           VARCHAR(255) NOT NULL,
+                    name                VARCHAR(500) NOT NULL,
+                    concurrency_limit   INTEGER,
+                    inter_call_delay_ms INTEGER,
+                    script_config       JSONB DEFAULT '{}'::jsonb,
+                    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+            """)
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS lead_interactions (
+                    id          SERIAL PRIMARY KEY,
+                    lead_id     VARCHAR(255) NOT NULL,
+                    tenant_id   VARCHAR(255) NOT NULL,
+                    type        VARCHAR(50)  NOT NULL,
+                    summary     TEXT,
+                    metadata    JSONB DEFAULT '{}'::jsonb,
+                    occurred_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+            """)
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS follow_ups (
+                    id           SERIAL PRIMARY KEY,
+                    lead_id      VARCHAR(255) NOT NULL,
+                    campaign_id  VARCHAR(255),
+                    tenant_id    VARCHAR(255) NOT NULL,
+                    scheduled_at TIMESTAMPTZ NOT NULL,
+                    status       VARCHAR(50) NOT NULL DEFAULT 'pending',
+                    notes        TEXT,
+                    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+            """)
+
+            # ── Composite indexes on existing tables ──────────────────────────
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_contacts_score
+                    ON contacts(((extra->>'lead_score')::int) DESC);
+            """)
+            # updated_at index — only if the column exists
+            cur.execute("""
+                DO $$
+                BEGIN
+                    IF EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name='contacts' AND column_name='updated_at'
+                    ) THEN
+                        CREATE INDEX IF NOT EXISTS idx_contacts_updated
+                            ON contacts(updated_at DESC);
+                    END IF;
+                END $$;
+            """)
+            # tenant_id index — only if the column exists
+            cur.execute("""
+                DO $$
+                BEGIN
+                    IF EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name='billing' AND column_name='tenant_id'
+                    ) THEN
+                        CREATE INDEX IF NOT EXISTS idx_billing_month_tenant
+                            ON billing(tenant_id, month);
+                    END IF;
+                END $$;
+            """)
+
+            # Add tenant_id column to billing if it doesn't exist (migration)
+            cur.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name='billing' AND column_name='tenant_id'
+                    ) THEN
+                        ALTER TABLE billing ADD COLUMN tenant_id VARCHAR(255);
+                    END IF;
+                END $$;
+            """)
+
+            # Add calling_window and min_connection_rate to campaigns (migration)
+            cur.execute("""
+                ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS calling_window JSONB DEFAULT NULL;
+                ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS min_connection_rate FLOAT DEFAULT NULL;
+            """)
+
             logger.info("PostgreSQL schema initialized")
 
 
@@ -300,6 +426,8 @@ def create_campaign(
     virtual_number: str,
     inter_call_delay_ms: int,
     original_columns: list[str],
+    calling_window: Optional[dict] = None,
+    min_connection_rate: Optional[float] = None,
 ) -> None:
     """Insert a new campaign record."""
     with get_connection() as conn:
@@ -307,11 +435,14 @@ def create_campaign(
             cur.execute("""
                 INSERT INTO campaigns (
                     campaign_id, client_id, name, status, concurrency_limit,
-                    virtual_number, inter_call_delay_ms, original_columns
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    virtual_number, inter_call_delay_ms, original_columns,
+                    calling_window, min_connection_rate
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """, (
                 campaign_id, client_id, name, "Idle", concurrency_limit,
-                virtual_number, inter_call_delay_ms, psycopg2.extras.Json(original_columns)
+                virtual_number, inter_call_delay_ms, psycopg2.extras.Json(original_columns),
+                psycopg2.extras.Json(calling_window) if calling_window is not None else None,
+                min_connection_rate,
             ))
 
 
@@ -527,6 +658,25 @@ def get_billing_by_campaign(client_id: str, month: str) -> list[dict]:
             return cur.fetchall()
 
 
+def get_billing_by_campaign_with_name(client_id: str, month: str) -> list[dict]:
+    """Get per-campaign billing breakdown including campaign name via JOIN."""
+    with get_connection() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                SELECT
+                    b.campaign_id,
+                    c.name AS campaign_name,
+                    COUNT(*) AS calls,
+                    COALESCE(SUM(b.duration_seconds), 0) AS total_seconds
+                FROM billing b
+                LEFT JOIN campaigns c ON c.campaign_id = b.campaign_id
+                WHERE b.client_id = %s AND b.month = %s
+                GROUP BY b.campaign_id, c.name
+                ORDER BY total_seconds DESC
+            """, (client_id, month))
+            return [dict(r) for r in cur.fetchall()]
+
+
 def get_daily_billing(client_id: str, month: str) -> list[dict]:
     """Get daily billing breakdown for a month."""
     with get_connection() as conn:
@@ -570,3 +720,188 @@ def log_call_event(
                 INSERT INTO call_logs (campaign_id, execution_id, call_sid, status, event_data)
                 VALUES (%s, %s, %s, %s, %s)
             """, (campaign_id, execution_id, call_sid, status, psycopg2.extras.Json(event_data)))
+
+
+# ── Tenant operations ─────────────────────────────────────────────────────────
+
+def create_tenant(
+    pool,
+    tenant_id: str,
+    name: str,
+    plan: str = "starter",
+    parent_id: Optional[str] = None,
+) -> None:
+    """Insert a new tenant record."""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO tenants (tenant_id, name, plan, parent_id)
+                VALUES (%s, %s, %s, %s)
+            """, (tenant_id, name, plan, parent_id))
+
+
+# ── API key operations ────────────────────────────────────────────────────────
+
+def create_api_key(
+    pool,
+    key_id: str,
+    tenant_id: str,
+    key_hash: str,
+    name: Optional[str] = None,
+    role: str = "manager",
+) -> dict:
+    """Insert a new API key and return the created record."""
+    with get_connection() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                INSERT INTO api_keys (key_id, tenant_id, key_hash, name, role)
+                VALUES (%s, %s, %s, %s, %s)
+                RETURNING *
+            """, (key_id, tenant_id, key_hash, name, role))
+            return dict(cur.fetchone())
+
+
+def get_api_key_by_hash(pool, key_hash: str) -> Optional[dict]:
+    """Return the API key record (including tenant_id and role) for a given hash, or None."""
+    with get_connection() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                SELECT * FROM api_keys WHERE key_hash = %s AND revoked = FALSE
+            """, (key_hash,))
+            row = cur.fetchone()
+            return dict(row) if row else None
+
+
+def revoke_api_key(pool, key_id: str, tenant_id: str) -> None:
+    """Mark an API key as revoked (scoped to the owning tenant)."""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE api_keys SET revoked = TRUE
+                WHERE key_id = %s AND tenant_id = %s
+            """, (key_id, tenant_id))
+
+
+# ── Campaign template operations ──────────────────────────────────────────────
+
+def save_template(
+    pool,
+    template_id: str,
+    tenant_id: str,
+    name: str,
+    concurrency_limit: Optional[int] = None,
+    inter_call_delay_ms: Optional[int] = None,
+    script_config: Optional[dict] = None,
+) -> None:
+    """Insert or replace a campaign template."""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO campaign_templates
+                    (template_id, tenant_id, name, concurrency_limit, inter_call_delay_ms, script_config)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (template_id) DO UPDATE SET
+                    name                = EXCLUDED.name,
+                    concurrency_limit   = EXCLUDED.concurrency_limit,
+                    inter_call_delay_ms = EXCLUDED.inter_call_delay_ms,
+                    script_config       = EXCLUDED.script_config
+            """, (
+                template_id, tenant_id, name,
+                concurrency_limit, inter_call_delay_ms,
+                psycopg2.extras.Json(script_config or {}),
+            ))
+
+
+def list_templates(pool, tenant_id: str) -> list[dict]:
+    """Return all templates for a tenant, newest first."""
+    with get_connection() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                SELECT * FROM campaign_templates
+                WHERE tenant_id = %s
+                ORDER BY created_at DESC
+            """, (tenant_id,))
+            return [dict(r) for r in cur.fetchall()]
+
+
+def clone_campaign(
+    pool,
+    source_campaign_id: str,
+    new_campaign_id: str,
+    new_name: str,
+    tenant_id: str,
+) -> dict:
+    """Clone a campaign (config only, no leads) and return the new campaign record."""
+    with get_connection() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                INSERT INTO campaigns
+                    (campaign_id, client_id, name, status, concurrency_limit,
+                     virtual_number, inter_call_delay_ms, original_columns)
+                SELECT
+                    %s, %s, %s, 'Idle', concurrency_limit,
+                    virtual_number, inter_call_delay_ms, original_columns
+                FROM campaigns
+                WHERE campaign_id = %s
+                RETURNING *
+            """, (new_campaign_id, tenant_id, new_name, source_campaign_id))
+            row = cur.fetchone()
+            if row is None:
+                raise ValueError(f"Source campaign '{source_campaign_id}' not found")
+            return dict(row)
+
+
+# ── Lead interaction operations ───────────────────────────────────────────────
+
+def insert_interaction(
+    pool,
+    lead_id: str,
+    tenant_id: str,
+    type: str,
+    summary: Optional[str] = None,
+    metadata: Optional[dict] = None,
+) -> None:
+    """Record a lead interaction event."""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO lead_interactions (lead_id, tenant_id, type, summary, metadata)
+                VALUES (%s, %s, %s, %s, %s)
+            """, (
+                lead_id, tenant_id, type, summary,
+                psycopg2.extras.Json(metadata or {}),
+            ))
+
+
+# ── Follow-up operations ──────────────────────────────────────────────────────
+
+def upsert_follow_up(
+    pool,
+    lead_id: str,
+    tenant_id: str,
+    scheduled_at,
+    campaign_id: Optional[str] = None,
+    notes: Optional[str] = None,
+) -> dict:
+    """Insert or update a follow-up task for a lead; returns the upserted record."""
+    with get_connection() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                INSERT INTO follow_ups (lead_id, tenant_id, campaign_id, scheduled_at, notes)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT DO NOTHING
+                RETURNING *
+            """, (lead_id, tenant_id, campaign_id, scheduled_at, notes))
+            row = cur.fetchone()
+            if row is None:
+                # Row already existed — update scheduled_at and notes, return updated row
+                cur.execute("""
+                    UPDATE follow_ups
+                    SET scheduled_at = %s,
+                        notes        = COALESCE(%s, notes),
+                        campaign_id  = COALESCE(%s, campaign_id)
+                    WHERE lead_id = %s AND tenant_id = %s AND status = 'pending'
+                    RETURNING *
+                """, (scheduled_at, notes, campaign_id, lead_id, tenant_id))
+                row = cur.fetchone()
+            return dict(row) if row else {}

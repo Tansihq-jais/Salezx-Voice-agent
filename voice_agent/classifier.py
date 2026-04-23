@@ -7,6 +7,8 @@ from __future__ import annotations
 import asyncio
 import logging
 
+import lead_scorer  # noqa: F401 – imported for future use in classification
+
 logger = logging.getLogger(__name__)
 
 # Keyword fallback map (used when Gemini is unavailable)

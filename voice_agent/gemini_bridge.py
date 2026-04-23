@@ -17,6 +17,7 @@ if "GEMINI_API_KEY" not in globals():
     from config import (
         GEMINI_API_KEY,
         GEMINI_MODEL,
+        GEMINI_VOICE,
         USE_VERTEX_AI,
         VERTEX_PROJECT_ID,
         VERTEX_LOCATION,
@@ -100,7 +101,7 @@ class GeminiBridge:
             ),
             speech_config=_types.SpeechConfig(
                 voice_config=_types.VoiceConfig(
-                    prebuilt_voice_config=_types.PrebuiltVoiceConfig(voice_name="Aoede")
+                    prebuilt_voice_config=_types.PrebuiltVoiceConfig(voice_name=GEMINI_VOICE)
                 )
             ),
             media_resolution="MEDIA_RESOLUTION_MEDIUM",

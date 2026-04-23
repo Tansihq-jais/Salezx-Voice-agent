@@ -14,6 +14,8 @@ import logging
 import re
 from typing import Optional
 
+import lead_scorer
+
 logger = logging.getLogger(__name__)
 
 # ── Prompt ────────────────────────────────────────────────────────────────────
@@ -57,6 +59,12 @@ Return ONLY a valid JSON object with this exact structure (no markdown, no expla
     "currentSolution": "<if mentioned, else null>"
   }},
   "followUpRequired": true | false,
+  "follow_up_recommended_at": "<ISO 8601 timestamp when to follow up, e.g. 2024-01-15T10:00:00Z, or null if no follow-up needed. Base on intent timeline: immediate=+1 day, within 30 days=+7 days, 3-6 months=+30 days, future/unknown=+14 days>",
+  "objection_categories": ["<one or more of: price, timing, authority, need, other>"],
+  "talk_ratio": {{
+    "agent": <float 0-1, estimated fraction of speaking time by agent>,
+    "prospect": <float 0-1, estimated fraction of speaking time by prospect, agent+prospect should sum to ~1.0>
+  }},
   "conversationSummary": "<2-3 sentence summary in English regardless of transcript language>",
   "nextAction": "<specific recommended action>",
   "detectedLanguage": "<primary language e.g. Hindi, Hinglish, Tamil, English>"
@@ -132,63 +140,13 @@ def _analyze_with_keywords(transcript: str, duration: float) -> dict:
             'decisionMaker': None, 'painPoints': [], 'requirements': [], 'currentSolution': None,
         },
         'followUpRequired': follow_up,
+        'follow_up_recommended_at': None,
+        'objection_categories': [],
+        'talk_ratio': {'agent': 0.5, 'prospect': 0.5},
         'conversationSummary': summary,
         'nextAction': 'Follow up as requested' if follow_up else 'Add to nurture campaign',
         'detectedLanguage': 'Unknown (keyword fallback)',
     }
-
-
-# ── Lead scoring ──────────────────────────────────────────────────────────────
-
-def calculate_lead_score(result: dict, duration: float, status: str) -> tuple[int, str]:
-    """
-    Score 0-100 and return (score, category).
-    Category: hot (80-100), warm (60-79), cold (30-59), not_interested (0-29)
-    """
-    score = 0
-
-    # Call completion
-    if status in ('Completed', 'completed'):
-        score += 20
-
-    # Duration (up to 15 pts)
-    score += min(15, int(duration / 60) * 3)
-
-    # Sentiment
-    sentiment = result.get('sentiment', {}).get('overall', 'neutral')
-    score += 20 if sentiment == 'positive' else 10 if sentiment == 'neutral' else 0
-
-    # Buying intent
-    intent = result.get('buyingIntent', {}).get('level', 'none')
-    score += 25 if intent == 'high' else 15 if intent == 'medium' else 5 if intent == 'low' else 0
-
-    # Interest level (0-10 → up to 10 pts)
-    score += min(10, result.get('interestLevel', 0))
-
-    # Decision maker
-    if result.get('extractedData', {}).get('decisionMaker'):
-        score += 5
-
-    # Budget mentioned
-    if result.get('extractedData', {}).get('budget'):
-        score += 5
-
-    # Follow-up requested
-    if result.get('followUpRequired'):
-        score += 10
-
-    score = min(100, max(0, score))
-
-    if score >= 80:
-        category = 'Hot'
-    elif score >= 60:
-        category = 'Warm'
-    elif score >= 30:
-        category = 'Cold'
-    else:
-        category = 'Not_Interested'
-
-    return score, category
 
 
 # ── Main entry point ──────────────────────────────────────────────────────────
@@ -216,7 +174,19 @@ async def analyze_call(
             result = _analyze_with_keywords(transcript, duration)
             provider = 'keyword'
 
-    score, category = calculate_lead_score(result, duration, status)
+    normalized = {
+        "sentiment": result.get("sentiment", {}),
+        "buying_intent": result.get("buyingIntent", {}),
+        "interest_level": result.get("interestLevel", 0),
+        "extracted": {
+            "decision_maker": result.get("extractedData", {}).get("decisionMaker"),
+            "budget": result.get("extractedData", {}).get("budget"),
+        },
+        "follow_up_required": result.get("followUpRequired", False),
+        "engagement_score": result.get("engagementScore", 0),
+    }
+    score = lead_scorer.score_lead(normalized, duration, status)
+    category = lead_scorer.category_from_score(score)
 
     return {
         'lead_id': lead_id,
@@ -231,6 +201,9 @@ async def analyze_call(
         'objections': result.get('objections', []),
         'extracted_data': result.get('extractedData', {}),
         'follow_up_required': result.get('followUpRequired', False),
+        'follow_up_recommended_at': result.get('follow_up_recommended_at'),
+        'objection_categories': result.get('objection_categories', []),
+        'talk_ratio': result.get('talk_ratio', {'agent': 0.5, 'prospect': 0.5}),
         'conversation_summary': result.get('conversationSummary', ''),
         'next_action': result.get('nextAction', ''),
         'detected_language': result.get('detectedLanguage', ''),

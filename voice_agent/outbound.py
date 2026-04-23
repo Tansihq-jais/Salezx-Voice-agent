@@ -22,12 +22,17 @@ EXOTEL_CALL_URL = (
 
 async def make_outbound_call(
     to: str,
-    from_: str = EXOTEL_CALLER_ID,  # defaults to configured virtual number
+    from_: str = EXOTEL_CALLER_ID,
     lead_name: str = "there",
     lead_company: str = "",
     call_context: str = "",
     record: bool = True,
 ) -> dict:
+    # Exotel requires 0XXXXXXXXXX format for Indian mobiles, not +91
+    if to.startswith("+91"):
+        to = "0" + to[3:]
+    elif not to.startswith("0") and len(to) == 10:
+        to = "0" + to
     """
     Place an outbound call. Exotel will connect to the caller and then
     open a WebSocket to our /ws/exotel endpoint with the custom parameters
@@ -43,13 +48,23 @@ async def make_outbound_call(
         f"&outbound=true"
     )
 
+    # The Url must point to your Exotel app (flow) that has the Voicebot applet configured.
+    # Format: http://my.exotel.in/exoml/start/<APP_ID>
+    # The APP_ID is found in your Exotel Dashboard → AppBazaar → your voicebot app.
+    # Your external /exoml endpoint is called BY Exotel once the voicebot applet runs —
+    # it is NOT the Url you pass here.
+    from config import EXOTEL_APP_ID
+    exotel_app_url = f"http://my.exotel.in/exoml/start/{EXOTEL_APP_ID}"
+
     payload = {
-        "From":        from_,    # your Exotel virtual number
-        "To":          to,       # destination number
-        "CallerId":    from_,
-        "Url":         exoml_url,
-        "Record":      "true" if record else "false",
+        "From":           to,             # customer number — Exotel calls this first
+        "CallerId":       from_,          # your Exotel virtual number
+        "Url":            exotel_app_url, # your Exotel app/flow that has the Voicebot applet
+        "CallType":       "trans",
+        "Record":         "true" if record else "false",
         "StatusCallback": f"{PUBLIC_URL}/call-status",
+        # Pass lead info as CustomField (max 3 params per Exotel docs)
+        "CustomField":    f"lead_name={lead_name}&lead_company={lead_company}&outbound=true",
     }
 
     async with httpx.AsyncClient(timeout=15) as client:
