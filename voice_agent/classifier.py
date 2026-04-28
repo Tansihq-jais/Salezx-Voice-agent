@@ -7,7 +7,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
-import lead_scorer  # noqa: F401 – imported for future use in classification
+import lead_scorer  # used by insights_analyzer (imported here to ensure it's available)
 
 logger = logging.getLogger(__name__)
 

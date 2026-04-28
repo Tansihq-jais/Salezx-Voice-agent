@@ -1,0 +1,8 @@
+Call SID : 699bf5d2b0faac30034ba7dc10f31a4o
+Time     : 2026-04-24T08:19:48.675252+00:00
+
+─── TRANSCRIPT ───────────────────────────────────────────
+Riya:Hello. Customer:Hello. Hello.
+
+─── COLLECTED INFO ───────────────────────────────────────
+LeadInfo(lead_id='', budget_min=None, budget_max=None, location=None, timeline=None, property_type=None, bhk=None, team_size=None, current_crm=None, pain_points=[], callback_time=None, demo_requested=False, notes=None)

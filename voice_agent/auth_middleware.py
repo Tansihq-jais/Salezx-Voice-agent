@@ -20,8 +20,8 @@ import pg_db
 logger = logging.getLogger(__name__)
 
 # Paths that bypass authentication entirely
-_SKIP_PATHS = {"/health", "/exoml", "/call-status"}
-_SKIP_PREFIX = "/ws/"
+_SKIP_PATHS = {"/health", "/exoml", "/call-status", "/api/events/stream"}
+_SKIP_PREFIX = ("/ws/", "/api/")  # skip auth for all /api/* routes
 
 
 class APIKeyMiddleware(BaseHTTPMiddleware):

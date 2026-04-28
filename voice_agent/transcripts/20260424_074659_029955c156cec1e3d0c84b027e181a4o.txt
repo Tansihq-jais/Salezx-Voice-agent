@@ -1,0 +1,8 @@
+Call SID : 029955c156cec1e3d0c84b027e181a4o
+Time     : 2026-04-24T07:46:59.205352+00:00
+
+─── TRANSCRIPT ───────────────────────────────────────────
+Riya: Namaste, main Riya:  Riya Riya:  bol Riya:  rahi hoon Riya:  GrabYourCar Riya:  se. Customer: Hello, ji boliye. Riya: Kya main Riya:  Rahul Riya:  sir Riya:  se baat Riya:  kar rahi Riya:  hoon? Customer: यह बोलिए। Riya: Rahul sir, Riya:  aapne Riya:  haal Riya:  hi mein Riya:  GrabYourCar Riya:  se service Riya:  li thi Riya:  — main Riya:  bas Riya:  yeh jaanna Riya:  chahti Riya:  thi ki Riya:  aapka Riya:  experience Riya:  kaisa Riya:  raha? Customer: हां, कर रहे हैं। Riya: Bahut achha Riya:  laga Riya:  sunke. Riya:  Koi Riya:  aur Riya:  cheez Riya:  thi Riya:  jo aur Riya:  better Riya:  ho sakti Riya:  thi?
+
+─── COLLECTED INFO ───────────────────────────────────────
+LeadInfo(lead_id='', budget_min=None, budget_max=None, location=None, timeline=None, property_type=None, bhk=None, team_size=None, current_crm=None, pain_points=[], callback_time=None, demo_requested=False, notes=None)

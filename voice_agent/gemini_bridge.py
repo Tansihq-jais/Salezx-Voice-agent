@@ -24,6 +24,8 @@ if "GEMINI_API_KEY" not in globals():
         GOOGLE_APPLICATION_CREDENTIALS,
         AGENT_NAME,
         COMPANY_NAME,
+        AGENT_LANGUAGE,
+        GEMINI_SPEAKING_RATE,
     )
 if "build_system_prompt" not in globals():
     from prompts import build_system_prompt, PromptType
@@ -35,6 +37,9 @@ if "LeadInfo" not in globals():
 logger = logging.getLogger(__name__)
 
 _OUTPUT_QUEUE_MAXSIZE = 100
+
+# Module-level flag — can be hot-patched by the settings API without a reload
+_AFFECTIVE_DIALOG: bool = True
 
 
 class GeminiBridge:
@@ -86,15 +91,24 @@ class GeminiBridge:
         self.output_queue: asyncio.Queue[Optional[bytes]] = asyncio.Queue(maxsize=_OUTPUT_QUEUE_MAXSIZE)
         self._active = False
         self.transcript_parts: list[str] = []
+        self.on_hangup: Optional[asyncio.Event] = asyncio.Event()  # set when agent wants to hang up
 
-    async def start(self):
-        system_prompt = build_system_prompt(
-            prompt_type=self.prompt_type,
-            lead_name=self.lead_name,
-            lead_company=self.lead_company,
-            call_context=self.call_context,
-            collected_info=self.collected_info,
-        )
+    async def start(self, send_greeting: bool = True):
+        # Pool-warm sessions use the prompt_type passed in (default "feedback").
+        # This avoids the large runtime override that causes speaking delay.
+        if self.call_sid == "pool-warm":
+            system_prompt = build_system_prompt(
+                prompt_type=self.prompt_type,
+                lead_name="there",
+            )
+        else:
+            system_prompt = build_system_prompt(
+                prompt_type=self.prompt_type,
+                lead_name=self.lead_name,
+                lead_company=self.lead_company,
+                call_context=self.call_context,
+                collected_info=self.collected_info,
+            )
         _types = genai.types
         config = _types.LiveConnectConfig(
             response_modalities=["AUDIO"],
@@ -105,7 +119,29 @@ class GeminiBridge:
             speech_config=_types.SpeechConfig(
                 voice_config=_types.VoiceConfig(
                     prebuilt_voice_config=_types.PrebuiltVoiceConfig(voice_name=GEMINI_VOICE)
-                )
+                ),
+                language_code=AGENT_LANGUAGE,
+            ),
+            # Transcribe both agent output and customer input so transcripts are captured
+            output_audio_transcription=_types.AudioTranscriptionConfig(),
+            input_audio_transcription=_types.AudioTranscriptionConfig(),
+            # ── Barge-in / turn-taking ────────────────────────────────────────
+            # START_SENSITIVITY_HIGH  — detect user speech quickly so agent
+            #   stops talking the moment the caller starts.
+            # END_SENSITIVITY_HIGH    — wait until the caller has clearly
+            #   finished before Gemini responds (avoids cutting in mid-sentence).
+            # silence_duration_ms=2000 — 2 s of silence required before Gemini
+            #   considers the caller done; gives room for natural pauses.
+            # prefix_padding_ms=300   — capture the first syllable reliably.
+            realtime_input_config=_types.RealtimeInputConfig(
+                automatic_activity_detection=_types.AutomaticActivityDetection(
+                    disabled=False,
+                    start_of_speech_sensitivity=_types.StartSensitivity.START_SENSITIVITY_HIGH,
+                    end_of_speech_sensitivity=_types.EndSensitivity.END_SENSITIVITY_HIGH,
+                    prefix_padding_ms=300,
+                    silence_duration_ms=2000,  # wait 2 s of silence before replying
+                ),
+                turn_coverage=_types.TurnCoverage.TURN_INCLUDES_ALL_INPUT,
             ),
             media_resolution="MEDIA_RESOLUTION_MEDIUM",
             context_window_compression=_types.ContextWindowCompressionConfig(
@@ -113,23 +149,24 @@ class GeminiBridge:
                 sliding_window=_types.SlidingWindow(target_tokens=52428),
             ),
         )
-        self._ctx = self._client.aio.live.connect(model=GEMINI_MODEL, config=config)
+        self._ctx     = self._client.aio.live.connect(model=GEMINI_MODEL, config=config)
         self._session = await self._ctx.__aenter__()
-        self._active = True
+        self._active  = True
         logger.info(f"[{self.call_sid}] Gemini session opened.")
 
-        # Start the receive loop first
         self._task = asyncio.create_task(self._receive_loop())
 
-        # Send initial greeting to trigger Gemini to speak
-        if self.outbound_intro:
-            initial_message = f"(Start the call. Say exactly: {self.outbound_intro})"
-        else:
-            # Default greeting for all calls
-            initial_message = f"(Greet the caller warmly and introduce yourself as {AGENT_NAME} from {COMPANY_NAME}. Ask how you can help them today.)"
-        
-        logger.info(f"[{self.call_sid}] Sending initial prompt to Gemini...")
-        await self._session.send_realtime_input(text=initial_message)
+        if send_greeting:
+            if self.outbound_intro:
+                msg = f"(Start the call. Say exactly: {self.outbound_intro})"
+            else:
+                import config as _cfg
+                msg = (
+                    f"(Greet the caller warmly and introduce yourself as {_cfg.AGENT_NAME} "
+                    f"from {_cfg.COMPANY_NAME}. Ask how you can help them today.)"
+                )
+            logger.info(f"[{self.call_sid}] Sending greeting to Gemini...")
+            await self._session.send_realtime_input(text=msg)
 
     async def stop(self):
         self._active = False
@@ -164,9 +201,13 @@ class GeminiBridge:
     async def send_interrupt(self):
         if not self._active or not self._session:
             return
-        # Drain buffered output audio immediately
+        # Drain buffered output audio immediately so no stale agent audio plays
+        drained = 0
         while not self.output_queue.empty():
             self.output_queue.get_nowait()
+            drained += 1
+        if drained:
+            logger.info(f"[{self.call_sid}] Manual interrupt — drained {drained} audio chunks")
         try:
             silent = genai.types.Blob(data=bytes(320), mime_type="audio/pcm;rate=16000")
             await self._session.send_realtime_input(audio=silent)
@@ -181,6 +222,20 @@ class GeminiBridge:
                     if not self._active:
                         break
 
+                    # ── Barge-in: customer started speaking mid-agent-turn ──
+                    # Gemini sets server_content.interrupted = True and stops
+                    # generating. We drain the output queue so no stale agent
+                    # audio plays over the customer's voice.
+                    if getattr(response, "server_content", None):
+                        if getattr(response.server_content, "interrupted", False):
+                            drained = 0
+                            while not self.output_queue.empty():
+                                self.output_queue.get_nowait()
+                                drained += 1
+                            if drained:
+                                logger.info(f"[{self.call_sid}] Barge-in detected — drained {drained} audio chunks")
+                            continue  # skip to next response, don't process audio
+
                     # Audio: response.data is raw PCM bytes at 24kHz
                     if response.data:
                         raw_pcm = response.data
@@ -192,15 +247,56 @@ class GeminiBridge:
                         except asyncio.QueueFull:
                             logger.warning(f"[{self.call_sid}] Audio queue full, dropping chunk")
 
-                    # Text transcript
+                    # Text transcript (agent output)
                     if response.text:
                         text = response.text
-                        logger.info(f"[{self.call_sid}] Transcript: {text}")
-                        self.transcript_parts.append(text)
+                        logger.info(f"[{self.call_sid}] Agent: {text}")
+                        self.transcript_parts.append(f"Riya: {text}")
                         if self.lead_id:
                             chunk_info = extract_from_chunk(self.lead_id, text)
                             self._merge_info(chunk_info)
                             upsert_info(self.collected_info)
+                        if "[[HANGUP]]" in text:
+                            logger.info(f"[{self.call_sid}] Hangup signal detected in text — ending call")
+                            self.on_hangup.set()
+
+                    # Input audio transcription (customer speech)
+                    if getattr(response, "server_content", None):
+                        sc = response.server_content
+                        # Agent output transcription — buffer chunks, also check for hangup signal
+                        if getattr(sc, "output_transcription", None):
+                            t = sc.output_transcription.text or ""
+                            if t.strip():
+                                if self.transcript_parts and self.transcript_parts[-1].startswith("Riya:"):
+                                    self.transcript_parts[-1] += t
+                                else:
+                                    self.transcript_parts.append(f"Riya:{t}")
+                                # Detect hangup from transcription (primary path in AUDIO-only mode)
+                                if "[[HANGUP]]" in t:
+                                    logger.info(f"[{self.call_sid}] Hangup signal detected in transcription — ending call")
+                                    self.on_hangup.set()
+                                # Also detect natural closing phrases as hangup trigger
+                                closing_phrases = [
+                                    "dhanyawad", "shukriya", "aapka din achha rahe",
+                                    "thank you", "goodbye", "bye", "alvida"
+                                ]
+                                tl = t.lower()
+                                if any(p in tl for p in closing_phrases):
+                                    # Set hangup after a short delay to let audio finish playing
+                                    async def _delayed_hangup():
+                                        await asyncio.sleep(3)
+                                        if not self.on_hangup.is_set():
+                                            logger.info(f"[{self.call_sid}] Closing phrase detected — hanging up")
+                                            self.on_hangup.set()
+                                    asyncio.create_task(_delayed_hangup())
+                        # Customer input transcription
+                        if getattr(sc, "input_transcription", None):
+                            t = sc.input_transcription.text or ""
+                            if t.strip():
+                                if self.transcript_parts and self.transcript_parts[-1].startswith("Customer:"):
+                                    self.transcript_parts[-1] += t
+                                else:
+                                    self.transcript_parts.append(f"Customer:{t}")
 
         except asyncio.CancelledError:
             pass

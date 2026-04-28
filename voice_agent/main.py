@@ -21,6 +21,7 @@ Endpoints:
   GET  /api/events/stream   — SSE real-time event stream
   GET  /dashboard           — simple HTML monitoring dashboard
 """
+import asyncio
 import hashlib
 import json
 import logging
@@ -44,7 +45,7 @@ from config import (
 )
 from auth_middleware import APIKeyMiddleware
 from rate_limiter import RateLimitMiddleware
-from exotel_handler import ExotelCallHandler
+from exotel_handler import ExotelCallHandler, _session_pool
 from outbound import make_outbound_call
 from campaign_orchestrator_pg import orchestrator
 from campaign_models import CampaignStatus, Lead, LeadStatus
@@ -89,6 +90,9 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error("Failed to initialize PostgreSQL", error=str(e))
         raise
+
+    # Start Gemini session pool in background — persists across the yield
+    await _session_pool.start()
 
     yield
 
@@ -173,17 +177,7 @@ async def exoml(
     prompt_type: str = "sales",
     outbound: str = "false",
 ):
-    """
-    Voicebot dynamic URL endpoint.
-    Exotel calls this via HTTP and expects a plain-text wss:// URL in response.
-    Exotel then connects a WebSocket to that URL to stream audio.
-    
-    Per Exotel docs (dynamic method):
-      "This URL must return a ws(s) endpoint" — plain text, not XML.
-    
-    Lead params come from CustomField query param (URL-encoded) or direct params.
-    """
-    # Exotel passes CustomField as a query param — parse it if present
+    # Parse CustomField if present
     custom_field = request.query_params.get("CustomField", "")
     if custom_field:
         from urllib.parse import parse_qs
@@ -194,21 +188,74 @@ async def exoml(
         prompt_type  = parsed.get("prompt_type",  [prompt_type])[0]
         outbound     = parsed.get("outbound",     [outbound])[0]
 
-    ws_url = PUBLIC_URL.replace("https://", "wss://").replace("http://", "ws://")
-    # Max 3 custom params allowed by Exotel Voicebot applet
-    ws_url += f"/ws/exotel?lead_name={lead_name}&lead_company={lead_company}&outbound={outbound}"
+    # Store params keyed by CallSid so the WS handler can look them up reliably
+    call_sid = request.query_params.get("CallSid", "")
+    if call_sid:
+        import call_store
+        from prompts import build_outbound_intro
+        from gemini_bridge import GeminiBridge
 
-    # Return JSON {"url": "wss://..."} — required by Exotel Voicebot applet dynamic method
+        is_outbound = outbound.lower() == "true"
+        outbound_intro = build_outbound_intro(lead_name, prompt_type) if is_outbound else None
+
+        # Start Gemini session NOW — we have all params and the customer hasn't picked up yet.
+        # Send the greeting trigger immediately so Gemini generates audio while phone is ringing.
+        # Audio buffers in output_queue until _on_start fires and the sender starts consuming it.
+        try:
+            bridge = GeminiBridge(
+                call_sid=call_sid,
+                lead_name=lead_name,
+                lead_company=lead_company,
+                call_context=call_context,
+                outbound_intro=outbound_intro,
+                prompt_type=prompt_type,
+            )
+            await bridge.start(send_greeting=False)
+
+            # Send trigger now — audio will be ready before customer picks up
+            if outbound_intro:
+                trigger = (
+                    f"IMPORTANT: The lead's name is {lead_name!r}. Call type: {prompt_type}.\n"
+                    f"Say exactly and only: \"{outbound_intro}\" — nothing else."
+                )
+            else:
+                trigger = f"IMPORTANT: The lead's name is {lead_name!r}. Call type: {prompt_type}. Begin immediately."
+            await bridge._session.send_realtime_input(text=trigger)
+
+            call_store.store_bridge(call_sid, bridge)
+            logger.info(f"[{call_sid}] Gemini session pre-started + greeting triggered: lead={lead_name!r}, prompt_type={prompt_type!r}")
+        except Exception as e:
+            logger.error(f"[{call_sid}] Failed to pre-start Gemini session: {e}")
+            call_store.store(call_sid, {
+                "lead_name": lead_name, "lead_company": lead_company,
+                "call_context": call_context, "prompt_type": prompt_type, "outbound": outbound,
+            })
+
+    ws_url = PUBLIC_URL.replace("https://", "wss://").replace("http://", "ws://")
+    ws_url += f"/ws/exotel?call_sid={call_sid}"
     return JSONResponse({"url": ws_url})
 
 
 # ── Call status callback ──────────────────────────────────────────────────────
+
+# In-memory set of numbers currently being called — prevents duplicate simultaneous calls
+_active_call_numbers: set[str] = set()
+
 
 @app.post("/call-status")
 async def call_status(request: Request):
     form = await request.form()
     data = dict(form)
     logger.info(f"Call status: {data}")
+
+    # Release dedup lock when call reaches a terminal state
+    terminal_statuses = {"completed", "failed", "busy", "no-answer", "canceled", "cancelled"}
+    if data.get("Status", "").lower() in terminal_statuses:
+        # Exotel sends CallFrom as the customer number
+        raw_number = data.get("CallFrom", data.get("From", ""))
+        normalised = raw_number.strip().lstrip("+").lstrip("0")
+        _active_call_numbers.discard(normalised)
+
     if orchestrator._current_campaign_id is not None:
         await orchestrator.on_call_status_callback(
             call_sid=data.get("CallSid", ""),
@@ -219,6 +266,7 @@ async def call_status(request: Request):
 
 
 # ── Outbound call ─────────────────────────────────────────────────────────────
+
 
 class OutboundCallRequest(BaseModel):
     to: str
@@ -232,6 +280,14 @@ class OutboundCallRequest(BaseModel):
 
 @app.post("/outbound")
 async def trigger_outbound(req: OutboundCallRequest):
+    # Normalise number for dedup check
+    normalised = req.to.strip().lstrip("+").lstrip("0")
+    if normalised in _active_call_numbers:
+        raise HTTPException(
+            status_code=429,
+            detail=f"A call to {req.to} is already active. Wait for it to complete before placing another."
+        )
+    _active_call_numbers.add(normalised)
     try:
         result = await make_outbound_call(
             to=req.to,
@@ -244,8 +300,33 @@ async def trigger_outbound(req: OutboundCallRequest):
         )
         return {"status": "call_placed", "exotel_response": result}
     except Exception as e:
+        _active_call_numbers.discard(normalised)
         logger.error(f"Outbound call failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Standalone call transcript logger ────────────────────────────────────────
+
+_TRANSCRIPT_DIR = os.path.join(os.path.dirname(__file__), "transcripts")
+os.makedirs(_TRANSCRIPT_DIR, exist_ok=True)
+
+async def _standalone_call_end(call_sid: str, transcript: str, collected_info):
+    """Save transcript + collected info to a timestamped file after every standalone call."""
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    filename = os.path.join(_TRANSCRIPT_DIR, f"{ts}_{call_sid}.txt")
+    lines = [
+        f"Call SID : {call_sid}",
+        f"Time     : {datetime.now(timezone.utc).isoformat()}",
+        f"",
+        f"─── TRANSCRIPT ───────────────────────────────────────────",
+        transcript.strip() if transcript.strip() else "(no transcript captured)",
+        f"",
+        f"─── COLLECTED INFO ───────────────────────────────────────",
+        str(collected_info) if collected_info else "(none)",
+    ]
+    with open(filename, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+    logger.info(f"[{call_sid}] Transcript saved → {filename}")
 
 
 # ── Exotel WebSocket ──────────────────────────────────────────────────────────
@@ -264,6 +345,10 @@ async def exotel_ws(websocket: WebSocket):
         if campaign and campaign["status"] in ("Running", "Paused"):
             on_call_end = orchestrator.on_call_end_callback
 
+    # Standalone call — wire up transcript logger so every call is saved to disk
+    if on_call_end is None:
+        on_call_end = _standalone_call_end
+
     # Try to get lead info from query params (for campaign calls)
     call_sid_param = websocket.query_params.get("callSid", "")
     if call_sid_param and orchestrator._current_campaign_id is not None:
@@ -272,10 +357,17 @@ async def exotel_ws(websocket: WebSocket):
             lead_id = lead["lead_id"]
             initial_info = get_lead_info(lead_id)
     
-    # Get lead name and prompt_type from query params (passed from /exoml endpoint)
-    lead_name = websocket.query_params.get("lead_name", "there")
-    prompt_type = websocket.query_params.get("prompt_type", "sales")
-    logger.info(f"WebSocket handler initialized for lead: {lead_name}, lead_id: {lead_id}, prompt_type: {prompt_type}")
+    # Look up call params stored at /exoml time via call_store
+    call_sid_param = websocket.query_params.get("call_sid", "")
+    import call_store
+    stored = call_store.pop(call_sid_param) if call_sid_param else {}
+
+    lead_name    = stored.get("lead_name",    "there")
+    prompt_type  = stored.get("prompt_type",  "sales")
+    lead_company = stored.get("lead_company", "")
+    is_outbound  = stored.get("outbound",     "false").lower() == "true"
+
+    logger.info(f"WebSocket handler: lead={lead_name!r}, prompt_type={prompt_type!r}, outbound={is_outbound}, sid={call_sid_param!r}")
 
     handler = ExotelCallHandler(
         websocket,
@@ -283,6 +375,9 @@ async def exotel_ws(websocket: WebSocket):
         lead_id=lead_id,
         initial_info=initial_info,
         prompt_type=prompt_type,
+        lead_name=lead_name,
+        lead_company=lead_company,
+        is_outbound=is_outbound,
     )
     await handler.run()
 
@@ -856,7 +951,16 @@ async def save_campaign_template(campaign_id: str, req: SaveTemplateRequest, req
 # ── Lead browse/management routes ─────────────────────────────────────────────
 
 @app.get("/api/leads")
-async def list_leads_api(request: Request, campaign_id: str = "", category: str = "", page: int = 1, limit: int = 50):
+async def list_leads_api(
+    request: Request,
+    campaign_id: str = "",
+    category: str = "",
+    page: int = 1,
+    limit: int = 50,
+    sort: str = "",
+    min_score: int = 0,
+    max_score: int = 100,
+):
     tenant_id = getattr(request.state, "tenant_id", CLIENT_ID)
     if campaign_id:
         leads = pg_db.list_contacts(campaign_id, status=None)
@@ -870,9 +974,23 @@ async def list_leads_api(request: Request, campaign_id: str = "", category: str 
                     ORDER BY c.updated_at DESC LIMIT %s OFFSET %s
                 """, (tenant_id, limit, (page - 1) * limit))
                 leads = cur.fetchall()
+    leads = [dict(l) for l in leads]
     if category:
         leads = [l for l in leads if l.get("classification") == category]
-    return {"success": True, "data": [dict(l) for l in leads]}
+    # Score filtering (lead_score stored in call_insights, approximate via classification)
+    if min_score > 0 or max_score < 100:
+        def _score(l: dict) -> int:
+            # Use lead_score from extra if present, otherwise estimate from classification
+            s = l.get("lead_score") or l.get("extra", {}).get("lead_score")
+            if s is not None:
+                return int(s)
+            cls = (l.get("classification") or "").lower()
+            return {"hot": 85, "warm": 65, "cold": 40, "not_interested": 15}.get(cls, 0)
+        leads = [l for l in leads if min_score <= _score(l) <= max_score]
+    # Sorting
+    if sort == "score":
+        leads.sort(key=lambda l: l.get("lead_score") or 0, reverse=True)
+    return {"success": True, "data": leads}
 
 
 @app.get("/api/leads/{lead_id}/history")
@@ -1101,11 +1219,7 @@ async def analytics_topics(campaign_id: str = ""):
 @app.get("/api/analytics/timeline")
 async def analytics_timeline(request: Request, month: str = ""):
     tenant_id = getattr(request.state, "tenant_id", CLIENT_ID)
-    try:
-        from billing import get_daily_billing_data
-        data = get_daily_billing_data(tenant_id, month)
-    except Exception:
-        data = pg_db.get_daily_billing(tenant_id, month or datetime.now(timezone.utc).strftime("%Y-%m"))
+    data = pg_db.get_daily_billing(tenant_id, month or datetime.now(timezone.utc).strftime("%Y-%m"))
     return {"success": True, "data": [dict(d) for d in data]}
 
 
@@ -1151,13 +1265,16 @@ async def revoke_api_key_endpoint(key_id: str, request: Request):
 
 @app.get("/api/settings")
 async def get_settings(request: Request):
-    from config import AGENT_NAME, COMPANY_NAME, PRODUCT_NAME, AGENT_LANGUAGE, GEMINI_VOICE
+    from config import AGENT_NAME, COMPANY_NAME, PRODUCT_NAME, AGENT_LANGUAGE, GEMINI_VOICE, GEMINI_SPEAKING_RATE
+    import gemini_bridge as _gb
     return {"success": True, "data": {
-        "agent_name": AGENT_NAME,
-        "company_name": COMPANY_NAME,
-        "product_name": PRODUCT_NAME,
-        "agent_language": AGENT_LANGUAGE,
-        "gemini_voice": GEMINI_VOICE,
+        "agent_name":           AGENT_NAME,
+        "company_name":         COMPANY_NAME,
+        "product_name":         PRODUCT_NAME,
+        "agent_language":       AGENT_LANGUAGE,
+        "gemini_voice":         GEMINI_VOICE,
+        "gemini_speaking_rate": GEMINI_SPEAKING_RATE,
+        "affective_dialog":     getattr(_gb, "_AFFECTIVE_DIALOG", True),
     }}
 
 
@@ -1167,6 +1284,8 @@ class UpdateSettingsRequest(BaseModel):
     product_name: str | None = None
     agent_language: str | None = None
     gemini_voice: str | None = None
+    gemini_speaking_rate: float | None = None
+    affective_dialog: bool | None = None
 
 
 import importlib
@@ -1190,6 +1309,8 @@ async def update_settings(req: UpdateSettingsRequest):
         updates["AGENT_LANGUAGE"] = req.agent_language
     if req.gemini_voice is not None:
         updates["GEMINI_VOICE"] = req.gemini_voice
+    if req.gemini_speaking_rate is not None:
+        updates["GEMINI_SPEAKING_RATE"] = str(req.gemini_speaking_rate)
 
     if updates:
         # Write to .env file
@@ -1225,15 +1346,25 @@ async def update_settings(req: UpdateSettingsRequest):
         for key, value in updates.items():
             os.environ[key] = value
             if hasattr(_cfg, key):
-                setattr(_cfg, key, value)
+                attr_val = float(value) if key == "GEMINI_SPEAKING_RATE" else value
+                setattr(_cfg, key, attr_val)
 
-        # Reload gemini_bridge so GEMINI_VOICE takes effect for new calls
-        if "gemini_voice" in (req.model_fields_set or set()):
-            try:
-                import gemini_bridge
-                importlib.reload(gemini_bridge)
-            except Exception:
-                pass
+    # Hot-patch affective dialog flag on gemini_bridge module
+    if req.affective_dialog is not None:
+        try:
+            import gemini_bridge as _gb
+            _gb._AFFECTIVE_DIALOG = req.affective_dialog
+        except Exception:
+            pass
+
+    # Reload gemini_bridge so voice/rate/language take effect for new calls
+    reload_fields = {"gemini_voice", "gemini_speaking_rate", "agent_language", "affective_dialog"}
+    if reload_fields & (req.model_fields_set or set()):
+        try:
+            import gemini_bridge
+            importlib.reload(gemini_bridge)
+        except Exception:
+            pass
 
     return {"success": True, "message": "Settings saved"}
 

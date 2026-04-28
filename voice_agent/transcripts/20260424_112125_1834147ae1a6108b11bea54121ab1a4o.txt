@@ -1,0 +1,8 @@
+Call SID : 1834147ae1a6108b11bea54121ab1a4o
+Time     : 2026-04-24T11:21:25.369649+00:00
+
+─── TRANSCRIPT ───────────────────────────────────────────
+Riya:Hello. Customer:Hello. Riya:Hello sir, main Riya bol rahi hoon GrabYourCar se. Kya main Tanishq sir se baat kar rahi hoon? Customer:हां, बताइए जी। आप कौन? Riya:Tanishq sir, aapne haal hi mein GrabYourCar se service li thi — main bas yeh jaanna chahti thi ki aapka overall experience kaisa raha? Customer:Grab Your Card pe car purchase karne ka one of the best experience tha. And I think ki delivery and everything was very perfect. And yes, everything is very good. Riya:Bahut achha laga sunke! Koi specific cheez jo aapko sabse zyada achhi lagi — delivery, process, ya hamari team ka behaviour? Customer:Ah! I can give a 10 on 10 rating to everyone like customer support bahut achcha tha. And delivery bhi kafi achchi thi. So, I like everything very much. Riya:Aapka feedback hamare liye bahut valuable hai. Kya koi ek cheez jo hum aur better kar sakte hain future mein? Customer:ऑन दैट आई थिंक कॉल मैनेजमेंट अबाउट चर्चा कर लेंगे। तो इट विल बी मोर बेनिफिशियल फॉर यू। Riya:Noted, sir. Call management pe hum zaroor dhyan denge. Aapka waqt dene ke liye bahut dhanyawad. Agar kabhi koi zaroorat ho, toh hum available hain.
+
+─── COLLECTED INFO ───────────────────────────────────────
+LeadInfo(lead_id='', budget_min=None, budget_max=None, location=None, timeline=None, property_type=None, bhk=None, team_size=None, current_crm=None, pain_points=[], callback_time=None, demo_requested=False, notes=None)

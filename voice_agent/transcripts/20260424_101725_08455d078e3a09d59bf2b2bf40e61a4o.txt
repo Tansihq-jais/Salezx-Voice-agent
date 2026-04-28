@@ -1,0 +1,8 @@
+Call SID : 08455d078e3a09d59bf2b2bf40e61a4o
+Time     : 2026-04-24T10:17:25.264613+00:00
+
+─── TRANSCRIPT ───────────────────────────────────────────
+Riya:Hello. Customer:Hello. Riya:Hello sir, main Riya bol rahi hoon GrabYourCar se. Kya
+
+─── COLLECTED INFO ───────────────────────────────────────
+LeadInfo(lead_id='', budget_min=None, budget_max=None, location=None, timeline=None, property_type=None, bhk=None, team_size=None, current_crm=None, pain_points=[], callback_time=None, demo_requested=False, notes=None)

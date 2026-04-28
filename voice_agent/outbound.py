@@ -65,8 +65,8 @@ async def make_outbound_call(
         "CallType":       "trans",
         "Record":         "true" if record else "false",
         "StatusCallback": f"{PUBLIC_URL}/call-status",
-        # Pass lead info as CustomField (max 3 params per Exotel docs)
-        "CustomField":    f"lead_name={lead_name}&lead_company={lead_company}&outbound=true",
+        # Pass lead info as CustomField — prompt_type included so /exoml can route correctly
+        "CustomField":    f"lead_name={lead_name}&lead_company={lead_company}&outbound=true&prompt_type={prompt_type}",
     }
 
     async with httpx.AsyncClient(timeout=15) as client:

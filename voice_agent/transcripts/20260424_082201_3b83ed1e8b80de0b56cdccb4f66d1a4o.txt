@@ -1,0 +1,8 @@
+Call SID : 3b83ed1e8b80de0b56cdccb4f66d1a4o
+Time     : 2026-04-24T08:22:01.309921+00:00
+
+─── TRANSCRIPT ───────────────────────────────────────────
+(no transcript captured)
+
+─── COLLECTED INFO ───────────────────────────────────────
+(none)

@@ -1,0 +1,8 @@
+Call SID : 7dd0a89e529d6ca5b2786432bbdb1a4o
+Time     : 2026-04-24T07:44:07.813778+00:00
+
+─── TRANSCRIPT ───────────────────────────────────────────
+(no transcript captured)
+
+─── COLLECTED INFO ───────────────────────────────────────
+LeadInfo(lead_id='', budget_min=None, budget_max=None, location=None, timeline=None, property_type=None, bhk=None, team_size=None, current_crm=None, pain_points=[], callback_time=None, demo_requested=False, notes=None)

@@ -14,6 +14,7 @@ export function useCampaigns() {
     queryKey: ['campaigns'],
     queryFn: () => api.get('/api/campaigns'),
     refetchInterval: 3000,
+    retry: false,
   });
 }
 
@@ -23,6 +24,7 @@ export function useCampaign(id: string) {
     queryFn: () => api.get(`/api/campaigns/${id}`),
     refetchInterval: 3000,
     enabled: !!id,
+    retry: false,
   });
 }
 

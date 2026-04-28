@@ -47,11 +47,14 @@ SERVER_WORKERS = int(os.getenv("SERVER_WORKERS", "1"))
 PUBLIC_URL     = os.getenv("PUBLIC_URL", "http://localhost:8000")
 
 # ── Agent persona ─────────────────────────────────────────────────────────────
-AGENT_NAME     = os.getenv("AGENT_NAME",    "Riya")
-COMPANY_NAME   = os.getenv("COMPANY_NAME",  "GrabYourCar")
-PRODUCT_NAME   = os.getenv("PRODUCT_NAME",  "GrabYourCar")
-AGENT_LANGUAGE = os.getenv("AGENT_LANGUAGE", "hi-IN")
-GEMINI_VOICE   = os.getenv("GEMINI_VOICE",  "Aoede")
+AGENT_NAME           = os.getenv("AGENT_NAME",    "Riya")
+COMPANY_NAME         = os.getenv("COMPANY_NAME",  "GrabYourCar")
+PRODUCT_NAME         = os.getenv("PRODUCT_NAME",  "GrabYourCar")
+AGENT_LANGUAGE       = os.getenv("AGENT_LANGUAGE", "hi-IN")
+GEMINI_VOICE         = os.getenv("GEMINI_VOICE",  "Kore")
+# Speaking rate: 0.25 (very slow/soft) → 1.0 (normal) → 2.0 (fast)
+# 0.85–0.95 gives a noticeably softer, more measured delivery
+GEMINI_SPEAKING_RATE = float(os.getenv("GEMINI_SPEAKING_RATE", "1.0"))
 
 # ── CORS ──────────────────────────────────────────────────────────────────────
 _origins_raw   = os.getenv("ALLOWED_ORIGINS", "*")

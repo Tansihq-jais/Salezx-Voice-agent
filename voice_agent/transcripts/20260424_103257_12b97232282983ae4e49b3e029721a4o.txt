@@ -1,0 +1,8 @@
+Call SID : 12b97232282983ae4e49b3e029721a4o
+Time     : 2026-04-24T10:32:57.915230+00:00
+
+─── TRANSCRIPT ───────────────────────────────────────────
+Riya:Hello. Customer:Hello. Hello. Riya:Hello sir, main Riya bol rahi hoon GrabYourCar se. Kya main Tanishq sir se baat kar rahi hoon? Customer:जी, कर रही हैं। Riya:Sir, aapne haal hi mein GrabYourCar se service li thi — main bas yeh jaanna chahti thi ki aapka overall experience kaisa raha? Customer:काफी बढ़िया है तो सब कुछ। Riya:Bahut achha laga sunke. Kaunsi cheez aapko sabse zyada achhi lagi — delivery, process, ya team ka behaviour? Customer:हां, तीन का भी है बेटा, पीस है। Riya:Achha, team responsive thi? Aapke sawaalon ka jawab milta raha? Customer:जी जी। Riya:Genuinely helpful hai hamare liye. Koi ek cheez jo hum aur better kar sakte hain? Customer:order debitor timing will ho sakti thi better ho jata Riya:Noted. Delivery timing pe zaroor kaam karenge hum. Aapka feedback hamare liye bahut important hai. Kya main aapka waqt le sakti hoon aur kuch sawaal poochhne ke liye? Customer:जी जी, पूछे। Riya:Aap kaunsi car segment mein interest rakhte hain — SUV, sedan, hatchback, koi specific model? Customer:मैं तो कौर और ली ले चुका हूं तो अब क्या करूंगा जान के? Riya:Samajh aa raha hai. Hum bas future ke liye apni services behtar banana chahte hain. Kya aapka budget range kuch fixed tha us time, jaise 8 se 12 lakh ke beech?
+
+─── COLLECTED INFO ───────────────────────────────────────
+LeadInfo(lead_id='', budget_min=None, budget_max=None, location=None, timeline=None, property_type=None, bhk=None, team_size=None, current_crm=None, pain_points=[], callback_time=None, demo_requested=False, notes=None)
