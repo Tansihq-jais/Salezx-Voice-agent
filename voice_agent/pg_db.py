@@ -1,8 +1,8 @@
 """
 pg_db.py — PostgreSQL (Neon) connection and schema management.
 
-Handles campaigns, contacts/leads, billing, and call_logs tables.
-MongoDB remains for call_insights and lead_info (AI analysis).
+Handles campaigns, contacts, call_logs, tenants, and credit tables.
+MongoDB handles call_insights and lead_info (AI analysis).
 """
 from __future__ import annotations
 
@@ -291,12 +291,26 @@ def init_db() -> None:
 
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS tenants (
-                    tenant_id   VARCHAR(255) PRIMARY KEY,
-                    name        VARCHAR(500) NOT NULL,
-                    plan        VARCHAR(50)  NOT NULL DEFAULT 'starter',
-                    parent_id   VARCHAR(255) REFERENCES tenants(tenant_id),
-                    created_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+                    tenant_id          VARCHAR(255) PRIMARY KEY,
+                    name               VARCHAR(500) NOT NULL,
+                    plan               VARCHAR(50)  NOT NULL DEFAULT 'starter',
+                    parent_id          VARCHAR(255) REFERENCES tenants(tenant_id),
+                    price_per_credit   NUMERIC(10,2) NOT NULL DEFAULT 10.00,
+                    created_at         TIMESTAMPTZ  NOT NULL DEFAULT NOW()
                 );
+            """)
+
+            # Add price_per_credit column if it doesn't exist (migration)
+            cur.execute("""
+                DO $
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name='tenants' AND column_name='price_per_credit'
+                    ) THEN
+                        ALTER TABLE tenants ADD COLUMN price_per_credit NUMERIC(10,2) NOT NULL DEFAULT 10.00;
+                    END IF;
+                END $;
             """)
 
             cur.execute("""
@@ -411,6 +425,57 @@ def init_db() -> None:
             cur.execute("""
                 ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS calling_window JSONB DEFAULT NULL;
                 ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS min_connection_rate FLOAT DEFAULT NULL;
+            """)
+
+            # ── Credit system tables ──────────────────────────────────────────
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS credit_balances (
+                    tenant_id   VARCHAR(255) PRIMARY KEY REFERENCES tenants(tenant_id),
+                    balance     NUMERIC(14,6) NOT NULL DEFAULT 0,
+                    updated_at  TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
+                    CONSTRAINT  balance_non_negative CHECK (balance >= 0)
+                );
+            """)
+
+            # Migrate balance column from INTEGER to NUMERIC if needed
+            cur.execute("""
+                DO $
+                BEGIN
+                    IF EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name='credit_balances' AND column_name='balance'
+                          AND data_type='integer'
+                    ) THEN
+                        ALTER TABLE credit_balances ALTER COLUMN balance TYPE NUMERIC(14,6);
+                    END IF;
+                END $;
+            """)
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS credit_ledger (
+                    id               BIGSERIAL     PRIMARY KEY,
+                    tenant_id        VARCHAR(255)  NOT NULL REFERENCES tenants(tenant_id),
+                    transaction_type VARCHAR(20)   NOT NULL
+                                     CHECK (transaction_type IN ('purchase','reservation','deduction','release','adjustment')),
+                    amount           NUMERIC(14,6) NOT NULL,
+                    call_sid         VARCHAR(255),
+                    campaign_id      VARCHAR(255),
+                    description      TEXT,
+                    idempotency_key  VARCHAR(255),
+                    created_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+                );
+            """)
+
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_credit_ledger_tenant_created
+                    ON credit_ledger(tenant_id, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_credit_ledger_call_sid
+                    ON credit_ledger(call_sid)
+                    WHERE call_sid IS NOT NULL;
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_ledger_idempotency
+                    ON credit_ledger(idempotency_key)
+                    WHERE idempotency_key IS NOT NULL;
             """)
 
             logger.info("PostgreSQL schema initialized")
@@ -589,121 +654,6 @@ def get_campaign_stats(campaign_id: str) -> dict:
             """, (campaign_id,))
             return cur.fetchone() or {}
 
-
-# ── Billing operations ────────────────────────────────────────────────────────
-
-def record_billing(
-    lead_id: str,
-    campaign_id: str,
-    client_id: str,
-    duration_seconds: float,
-    month: str,
-    lead_name: str = "",
-    lead_phone: str = "",
-) -> None:
-    """Insert or update a billing record."""
-    if duration_seconds <= 0:
-        return
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
-                INSERT INTO billing (lead_id, campaign_id, client_id, lead_name, lead_phone, duration_seconds, month)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (lead_id) DO UPDATE SET
-                    duration_seconds = EXCLUDED.duration_seconds,
-                    billed_at = NOW()
-            """, (lead_id, campaign_id, client_id, lead_name, lead_phone, duration_seconds, month))
-
-
-def get_monthly_billing_totals(client_id: str, month: str) -> dict:
-    """Get total calls and seconds for a client in a given month."""
-    with get_connection() as conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute("""
-                SELECT
-                    COUNT(*) as total_calls,
-                    COALESCE(SUM(duration_seconds), 0) as total_seconds
-                FROM billing WHERE client_id = %s AND month = %s
-            """, (client_id, month))
-            return cur.fetchone() or {"total_calls": 0, "total_seconds": 0}
-
-
-def get_campaign_billing_totals(campaign_id: str, month: str) -> dict:
-    """Get total calls and seconds for a campaign in a given month."""
-    with get_connection() as conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute("""
-                SELECT
-                    COUNT(*) as calls,
-                    COALESCE(SUM(duration_seconds), 0) as total_seconds
-                FROM billing WHERE campaign_id = %s AND month = %s
-            """, (campaign_id, month))
-            return cur.fetchone() or {"calls": 0, "total_seconds": 0}
-
-
-def get_billing_by_campaign(client_id: str, month: str) -> list[dict]:
-    """Get per-campaign billing breakdown for a month."""
-    with get_connection() as conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute("""
-                SELECT
-                    campaign_id,
-                    COUNT(*) as calls,
-                    COALESCE(SUM(duration_seconds), 0) as total_seconds
-                FROM billing
-                WHERE client_id = %s AND month = %s
-                GROUP BY campaign_id
-                ORDER BY total_seconds DESC
-            """, (client_id, month))
-            return cur.fetchall()
-
-
-def get_billing_by_campaign_with_name(client_id: str, month: str) -> list[dict]:
-    """Get per-campaign billing breakdown including campaign name via JOIN."""
-    with get_connection() as conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute("""
-                SELECT
-                    b.campaign_id,
-                    c.name AS campaign_name,
-                    COUNT(*) AS calls,
-                    COALESCE(SUM(b.duration_seconds), 0) AS total_seconds
-                FROM billing b
-                LEFT JOIN campaigns c ON c.campaign_id = b.campaign_id
-                WHERE b.client_id = %s AND b.month = %s
-                GROUP BY b.campaign_id, c.name
-                ORDER BY total_seconds DESC
-            """, (client_id, month))
-            return [dict(r) for r in cur.fetchall()]
-
-
-def get_daily_billing(client_id: str, month: str) -> list[dict]:
-    """Get daily billing breakdown for a month."""
-    with get_connection() as conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute("""
-                SELECT
-                    DATE(billed_at) as date,
-                    COUNT(*) as calls,
-                    COALESCE(SUM(duration_seconds), 0) as total_seconds
-                FROM billing
-                WHERE client_id = %s AND month = %s
-                GROUP BY DATE(billed_at)
-                ORDER BY date
-            """, (client_id, month))
-            return cur.fetchall()
-
-
-def get_available_billing_months(client_id: str) -> list[str]:
-    """Get list of months with billing data for a client."""
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT DISTINCT month FROM billing WHERE client_id = %s ORDER BY month DESC
-            """, (client_id,))
-            return [row[0] for row in cur.fetchall()]
-
-
 # ── Call logs ─────────────────────────────────────────────────────────────────
 
 def log_call_event(
@@ -730,14 +680,48 @@ def create_tenant(
     name: str,
     plan: str = "starter",
     parent_id: Optional[str] = None,
+    price_per_credit: float = 10.00,
 ) -> None:
     """Insert a new tenant record."""
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("""
-                INSERT INTO tenants (tenant_id, name, plan, parent_id)
-                VALUES (%s, %s, %s, %s)
-            """, (tenant_id, name, plan, parent_id))
+                INSERT INTO tenants (tenant_id, name, plan, parent_id, price_per_credit)
+                VALUES (%s, %s, %s, %s, %s)
+            """, (tenant_id, name, plan, parent_id, price_per_credit))
+
+
+def get_credit_pricing(tenant_id: str) -> float:
+    """Return the price per credit (INR) for a tenant. Defaults to ₹10.00 if not set."""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT price_per_credit FROM tenants WHERE tenant_id = %s",
+                (tenant_id,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return 10.00
+            return float(row[0])
+
+
+def set_credit_pricing(tenant_id: str, price_per_credit: float) -> float:
+    """Set the price per credit (INR) for a tenant. Returns the new price."""
+    if price_per_credit <= 0:
+        raise ValueError("price_per_credit must be a positive number")
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE tenants SET price_per_credit = %s WHERE tenant_id = %s
+                RETURNING price_per_credit
+                """,
+                (price_per_credit, tenant_id),
+            )
+            row = cur.fetchone()
+            if row is None:
+                raise ValueError(f"Tenant '{tenant_id}' not found")
+            return float(row[0])
 
 
 # ── API key operations ────────────────────────────────────────────────────────

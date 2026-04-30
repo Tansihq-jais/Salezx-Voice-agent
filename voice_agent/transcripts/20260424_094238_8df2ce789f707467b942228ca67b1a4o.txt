@@ -1,8 +1,0 @@
-Call SID : 8df2ce789f707467b942228ca67b1a4o
-Time     : 2026-04-24T09:42:38.902533+00:00
-
-─── TRANSCRIPT ───────────────────────────────────────────
-Riya:Hello. Customer:Hello. Riya:Hello sir, main Riya bol rahi hoon GrabYourCar se. Kya main Tanishq sir se baat kar rahi hoon? Customer:जी कर रही हूं, बताइए। Riya:Sir, aapne haal hi mein GrabYourCar se service li thi — main bas yeh jaanna chahti thi ki aapka overall experience kaisa raha? Customer:kabhi achcha tha like, take out problems, delay ho gaya thoda sa, baki theek tha. Riya:Inconvenience ke liye maafi chahti hoon sir. Delivery delay ki wajah se kya dikkat aayi aapko? Aur process mein koi aur cheez aapko disturb kari? Customer:नहीं, नहीं। बाकी सब सही था। Riya:Achha, toh delivery delay ko chhodkar, baaki sab smooth tha? Process aur team ka behaviour kaisa laga? Customer:Ahí está, papi. Coge el el suiche. Riya:Bahut achha laga sunke ki team helpful thi. Kya koi ek cheez jo aapko sabse zyada pasand aayi hamari service mein? Customer:management ka padhai Riya:Noted sir. Hum is pe aur dhyan denge. Aapka feedback hamare liye bahut valuable hai. Apna waqt dene ke liye bahut dhanyawad. Agar kabhi koi zaroorat ho toh hum available hain.
-
-─── COLLECTED INFO ───────────────────────────────────────
-LeadInfo(lead_id='', budget_min=None, budget_max=None, location=None, timeline=None, property_type=None, bhk=None, team_size=None, current_crm=None, pain_points=[], callback_time=None, demo_requested=False, notes=None)

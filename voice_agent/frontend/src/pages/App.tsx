@@ -10,6 +10,7 @@ import Leads from './Leads';
 import LeadDetail from './LeadDetail';
 import Billing from './Billing';
 import Settings from './Settings';
+import { useCredits } from '../hooks/useCredits';
 
 const queryClient = new QueryClient({
   defaultOptions: { queries: { retry: 1, staleTime: 2000 } },
@@ -54,13 +55,6 @@ function IconLeads({ active }: { active: boolean }) {
     </svg>
   );
 }
-function IconSupport() {
-  return (
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#6B7280" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <circle cx="12" cy="12" r="10" /><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" /><line x1="12" y1="17" x2="12.01" y2="17" />
-    </svg>
-  );
-}
 function IconLogout() {
   return (
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#6B7280" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -81,8 +75,7 @@ function IconHelp() {
       <circle cx="12" cy="12" r="10" /><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" /><line x1="12" y1="17" x2="12.01" y2="17" />
     </svg>
   );
-}
-function IconSettings({ active }: { active?: boolean }) {
+}function IconSettings({ active }: { active?: boolean }) {
   return (
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke={active ? '#C84B0C' : '#6B7280'} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <circle cx="12" cy="12" r="3" />
@@ -136,7 +129,7 @@ function Sidebar() {
       {/* Bottom nav */}
       <div className="px-3 pb-6 space-y-0.5 border-t border-gray-100 pt-3">
         <button className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-sm font-medium text-gray-600 hover:bg-gray-50 hover:text-gray-900 transition-colors">
-          <IconSupport />
+          <IconHelp />
           <span>Support</span>
         </button>
         <button className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-sm font-medium text-gray-600 hover:bg-gray-50 hover:text-gray-900 transition-colors">
@@ -156,6 +149,10 @@ function Topbar() {
   });
 
   const companyName = settingsData?.data?.company_name ?? '';
+  const { balance } = useCredits();
+  const creditBalance = balance.data?.balance ?? null;
+  const isLow = creditBalance !== null && creditBalance < 10;
+  const isEmpty = creditBalance !== null && creditBalance === 0;
 
   return (
     <header className="h-14 bg-white border-b border-gray-200 flex items-center px-6 gap-4 shrink-0">
@@ -174,9 +171,30 @@ function Topbar() {
       </div>
 
       <div className="flex items-center gap-3 ml-auto">
-        <button className="p-2 rounded-lg text-gray-500 hover:bg-gray-100 transition-colors" aria-label="Notifications">
-          <IconBell />
-        </button>
+        {/* Credit balance + Bell */}
+        <div className="flex items-center gap-2">
+          <span
+            className={`text-xs font-semibold px-2.5 py-1 rounded-lg border ${
+              isEmpty
+                ? 'bg-red-50 text-red-600 border-red-200'
+                : isLow
+                ? 'bg-amber-50 text-amber-600 border-amber-200'
+                : 'bg-gray-100 text-gray-600 border-gray-200'
+            }`}
+            title="Credits remaining"
+          >
+            Credits : {balance.isLoading
+              ? '…'
+              : creditBalance === null
+              ? '00'
+              : creditBalance % 1 === 0
+              ? creditBalance.toLocaleString()
+              : creditBalance.toFixed(4)}
+          </span>
+          <button className="p-2 rounded-lg text-gray-500 hover:bg-gray-100 transition-colors" aria-label="Notifications">
+            <IconBell />
+          </button>
+        </div>
         <button className="p-2 rounded-lg text-gray-500 hover:bg-gray-100 transition-colors" aria-label="Help">
           <IconHelp />
         </button>
