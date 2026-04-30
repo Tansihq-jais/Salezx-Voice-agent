@@ -17,12 +17,14 @@ Endpoints:
   GET  /campaign/results    — download results CSV
   GET  /leads/{id}/info     — extracted lead info
   GET  /api/insights/*      — call insights API
-  GET  /api/billing/*       — billing API
+  GET  /api/credits/*       — credits API
+  GET  /api/analytics/*     — analytics API
   GET  /api/events/stream   — SSE real-time event stream
   GET  /dashboard           — simple HTML monitoring dashboard
 """
 import asyncio
 import hashlib
+import importlib
 import json
 import logging
 import os
@@ -33,7 +35,7 @@ from datetime import datetime, timezone
 import psycopg2.extras
 import uvicorn
 from fastapi import FastAPI, WebSocket, Request, HTTPException, UploadFile, File
-from fastapi.responses import JSONResponse, Response, HTMLResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
@@ -48,7 +50,7 @@ from rate_limiter import RateLimitMiddleware
 from exotel_handler import ExotelCallHandler, _session_pool
 from outbound import make_outbound_call
 from campaign_orchestrator_pg import orchestrator
-from campaign_models import CampaignStatus, Lead, LeadStatus
+from campaign_models import Lead, LeadStatus
 from csv_parser import CSVParseError
 from lead_info import get as get_lead_info
 from ocr_parser import parse_file_to_contacts, SUPPORTED_EXTENSIONS
@@ -56,7 +58,8 @@ from call_insights import (
     get_insight, get_insights_by_campaign,
     get_insights_by_category, get_dashboard_summary,
 )
-from billing import record_call, get_monthly_summary, get_campaign_billing, estimate_cost
+import credit_service
+from credit_service import DuplicateIdempotencyKeyError
 import pg_db
 from event_bus import bus
 
@@ -248,20 +251,43 @@ async def call_status(request: Request):
     data = dict(form)
     logger.info(f"Call status: {data}")
 
+    call_sid = data.get("CallSid", "")
+    status = data.get("Status", "")
+
     # Release dedup lock when call reaches a terminal state
     terminal_statuses = {"completed", "failed", "busy", "no-answer", "canceled", "cancelled"}
-    if data.get("Status", "").lower() in terminal_statuses:
+    if status.lower() in terminal_statuses:
         # Exotel sends CallFrom as the customer number
         raw_number = data.get("CallFrom", data.get("From", ""))
         normalised = raw_number.strip().lstrip("+").lstrip("0")
         _active_call_numbers.discard(normalised)
 
+    # Exotel sends CallDuration (seconds) in the status callback
+    duration = float(data.get("CallDuration") or data.get("Duration") or 0)
+
     if orchestrator._current_campaign_id is not None:
         await orchestrator.on_call_status_callback(
-            call_sid=data.get("CallSid", ""),
-            status=data.get("Status", ""),
-            duration=float(data.get("Duration") or 0),
+            call_sid=call_sid,
+            status=status,
+            duration=duration,
         )
+
+    # Finalize credit deduction when the call reaches a terminal state.
+    # Resolve tenant_id from the call record; fall back to CLIENT_ID.
+    if status.lower() in terminal_statuses and call_sid:
+        try:
+            tenant_id = CLIENT_ID
+            if call_sid:
+                contact = pg_db.get_contact_by_call_sid(call_sid)
+                if contact:
+                    # Look up the campaign to get the tenant (client_id)
+                    campaign = pg_db.get_campaign(contact.get("campaign_id", ""))
+                    if campaign:
+                        tenant_id = campaign.get("client_id", CLIENT_ID)
+            credit_service.finalize_call(tenant_id, call_sid, duration)
+        except Exception as exc:
+            logger.warning(f"credit_service.finalize_call failed for call_sid={call_sid!r}: {exc}")
+
     return JSONResponse({"received": True})
 
 
@@ -279,7 +305,18 @@ class OutboundCallRequest(BaseModel):
 
 
 @app.post("/outbound")
-async def trigger_outbound(req: OutboundCallRequest):
+async def trigger_outbound(req: OutboundCallRequest, request: Request):
+    tenant_id = getattr(request.state, "tenant_id", CLIENT_ID)
+
+    # Step 1: Check balance before placing the call — return 402 if zero.
+    # Requirements: 3.1, 3.2
+    balance = credit_service.get_balance(tenant_id)
+    if balance == 0:
+        raise HTTPException(
+            status_code=402,
+            detail="Insufficient credits. Please purchase credits to continue making calls.",
+        )
+
     # Normalise number for dedup check
     normalised = req.to.strip().lstrip("+").lstrip("0")
     if normalised in _active_call_numbers:
@@ -289,6 +326,7 @@ async def trigger_outbound(req: OutboundCallRequest):
         )
     _active_call_numbers.add(normalised)
     try:
+        # Step 2: Place the call — Exotel returns the real call_sid.
         result = await make_outbound_call(
             to=req.to,
             from_=req.from_number,
@@ -298,7 +336,30 @@ async def trigger_outbound(req: OutboundCallRequest):
             record=req.record,
             prompt_type=req.prompt_type,
         )
+
+        # Step 3: Reserve 1 credit using the real Exotel call_sid.
+        # This is slightly racy (balance could drop to 0 between check and reserve)
+        # but acceptable for MVP — check_and_reserve will raise InsufficientCreditsError
+        # if another concurrent call consumed the last credit.
+        call_sid = result.get("call_sid", "")
+        if call_sid and call_sid != "unknown":
+            try:
+                credit_service.check_and_reserve(tenant_id, call_sid)
+            except credit_service.InsufficientCreditsError:
+                # Balance was consumed between check and reserve — log but don't fail
+                # the call since it's already been placed.
+                logger.warning(
+                    f"Credit reservation failed after call placed: tenant={tenant_id!r}, "
+                    f"call_sid={call_sid!r} — balance exhausted between check and reserve"
+                )
+            except credit_service.DuplicateReservationError:
+                # Already reserved (shouldn't happen for a fresh call_sid, but safe to ignore)
+                pass
+
         return {"status": "call_placed", "exotel_response": result}
+    except HTTPException:
+        _active_call_numbers.discard(normalised)
+        raise
     except Exception as e:
         _active_call_numbers.discard(normalised)
         logger.error(f"Outbound call failed: {e}")
@@ -577,33 +638,59 @@ async def insight_detail(lead_id: str):
     return {"success": True, "data": insight}
 
 
-# ── Billing API ───────────────────────────────────────────────────────────────
+# ── Billing API (credits-based — monthly billing removed) ────────────────────
 
 @app.get("/api/billing")
 @app.get("/api/billing/summary")
 async def billing_summary(request: Request, month: str = ""):
-    """Billing summary — accessible at both /api/billing and /api/billing/summary."""
-    tenant_id = getattr(request.state, "tenant_id", CLIENT_ID)
-    data = get_monthly_summary(month or None, client_id=tenant_id)
-    return {"success": True, "data": data}
+    """Credits summary — kept for backwards compatibility with the frontend.
 
-
-@app.get("/api/billing/campaign/{campaign_id}")
-async def billing_campaign(request: Request, campaign_id: str, month: str = ""):
+    Returns credit balance and pricing instead of the old monthly billing data.
+    """
     tenant_id = getattr(request.state, "tenant_id", CLIENT_ID)
-    data = get_campaign_billing(campaign_id, month or None, client_id=tenant_id)
+    data = credit_service.get_balance_with_pricing(tenant_id)
     return {"success": True, "data": data}
 
 
 class BillingEstimateRequest(BaseModel):
     num_contacts: int
-    avg_duration_min: float = 2.0
+    avg_duration_min: float = 2.0  # minutes; 1 credit = 1 minute = 60 seconds
 
 
 @app.post("/api/billing/estimate")
-async def billing_estimate(req: BillingEstimateRequest):
-    data = estimate_cost(req.num_contacts, req.avg_duration_min)
-    return {"success": True, "data": data}
+async def billing_estimate(req: BillingEstimateRequest, request: Request):
+    """Estimate credits needed for a batch of calls.
+
+    1 credit = 60 seconds (1 minute). Usage is decimal — no rounding up.
+    A 1.5-minute call costs 1.5 credits exactly.
+    Returns estimated credits and INR cost at the tenant's price_per_credit.
+    """
+    tenant_id = getattr(request.state, "tenant_id", CLIENT_ID)
+    price_per_credit = pg_db.get_credit_pricing(tenant_id)
+    estimated_credits = round(req.num_contacts * req.avg_duration_min, 4)
+    estimated_cost = round(estimated_credits * price_per_credit, 2)
+    return {
+        "success": True,
+        "data": {
+            "num_contacts": req.num_contacts,
+            "avg_duration_min": req.avg_duration_min,
+            "estimated_credits": estimated_credits,
+            "price_per_credit": price_per_credit,
+            "estimated_cost_inr": estimated_cost,
+        },
+    }
+
+
+class PurchaseRequest(BaseModel):
+    amount: int
+    description: str = ""
+    idempotency_key: str | None = None
+
+
+class AdminAdjustRequest(BaseModel):
+    tenant_id: str
+    amount: int
+    description: str
 
 
 # ── SSE event stream ──────────────────────────────────────────────────────────
@@ -1057,7 +1144,6 @@ async def schedule_follow_up(lead_id: str, req: FollowUpRequest, request: Reques
     if not lead:
         raise HTTPException(status_code=404, detail="Lead not found")
     try:
-        from datetime import datetime
         scheduled_at = datetime.fromisoformat(req.follow_up_at)
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid follow_up_at datetime format")
@@ -1218,9 +1304,29 @@ async def analytics_topics(campaign_id: str = ""):
 
 @app.get("/api/analytics/timeline")
 async def analytics_timeline(request: Request, month: str = ""):
+    """Return daily call counts for the current month from contacts table."""
     tenant_id = getattr(request.state, "tenant_id", CLIENT_ID)
-    data = pg_db.get_daily_billing(tenant_id, month or datetime.now(timezone.utc).strftime("%Y-%m"))
-    return {"success": True, "data": [dict(d) for d in data]}
+    target_month = month or datetime.now(timezone.utc).strftime("%Y-%m")
+    try:
+        with pg_db.get_connection() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT
+                        DATE(updated_at) AS date,
+                        COUNT(*) AS calls
+                    FROM contacts
+                    WHERE client_id = %s
+                      AND status IN ('Completed', 'Failed', 'Not_Picked')
+                      AND TO_CHAR(updated_at, 'YYYY-MM') = %s
+                    GROUP BY DATE(updated_at)
+                    ORDER BY date
+                """, (tenant_id, target_month))
+                rows = cur.fetchall()
+        data = [{"date": str(r["date"]), "calls": int(r["calls"])} for r in rows]
+    except Exception as exc:
+        logger.warning(f"analytics_timeline query failed: {exc}")
+        data = []
+    return {"success": True, "data": data}
 
 
 # ── Auth management routes ────────────────────────────────────────────────────
@@ -1287,8 +1393,6 @@ class UpdateSettingsRequest(BaseModel):
     gemini_speaking_rate: float | None = None
     affective_dialog: bool | None = None
 
-
-import importlib
 
 @app.put("/api/settings")
 async def update_settings(req: UpdateSettingsRequest):
@@ -1367,6 +1471,121 @@ async def update_settings(req: UpdateSettingsRequest):
             pass
 
     return {"success": True, "message": "Settings saved"}
+
+
+# ── Credits API ───────────────────────────────────────────────────────────────
+
+@app.get("/api/credits/balance")
+async def credits_balance(request: Request):
+    """Return the current credit balance for the authenticated tenant.
+
+    Requirements: 5.1, 5.2
+    """
+    tenant_id = getattr(request.state, "tenant_id", CLIENT_ID)
+    balance = credit_service.get_balance(tenant_id)
+    return {"balance": balance, "tenant_id": tenant_id}
+
+
+@app.get("/api/credits/ledger")
+async def credits_ledger(request: Request, page: int = 1, page_size: int = 50):
+    """Return a paginated ledger of credit transactions for the authenticated tenant.
+
+    Requirements: 5.3, 5.4
+    """
+    tenant_id = getattr(request.state, "tenant_id", CLIENT_ID)
+    return credit_service.get_ledger(tenant_id, page=page, page_size=page_size)
+
+
+@app.post("/api/credits/purchase")
+async def credits_purchase(req: PurchaseRequest, request: Request):
+    """Purchase credits for the authenticated tenant.
+
+    Returns HTTP 400 on invalid amount, HTTP 200 with original result on
+    duplicate idempotency key.
+
+    Requirements: 2.4, 2.5, 9.1
+    """
+    tenant_id = getattr(request.state, "tenant_id", CLIENT_ID)
+    try:
+        result = credit_service.purchase_credits(
+            tenant_id=tenant_id,
+            amount=req.amount,
+            description=req.description,
+            idempotency_key=req.idempotency_key,
+        )
+        return result
+    except DuplicateIdempotencyKeyError as exc:
+        return exc.original_result
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/credits/admin/adjust")
+async def credits_admin_adjust(req: AdminAdjustRequest, request: Request):
+    """Apply a signed credit adjustment for any tenant (admin only).
+
+    Requires the caller's API key to have role == "admin".
+    Returns HTTP 403 if not admin, HTTP 400 if adjustment would go negative.
+
+    Requirements: 8.1, 8.2, 8.3
+    """
+    role = getattr(request.state, "role", None)
+    if role != "admin":
+        raise HTTPException(status_code=403, detail="Admin role required.")
+
+    admin_tenant_id = getattr(request.state, "tenant_id", CLIENT_ID)
+    try:
+        result = credit_service.admin_adjust(
+            tenant_id=req.tenant_id,
+            amount=req.amount,
+            description=req.description,
+            admin_tenant_id=admin_tenant_id,
+        )
+        return result
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+class SetPricingRequest(BaseModel):
+    price_per_credit: float
+
+
+@app.get("/api/credits/admin/pricing/{tenant_id}")
+async def get_credit_pricing(tenant_id: str, request: Request):
+    """Get the price per credit (INR) for a specific tenant (admin only)."""
+    role = getattr(request.state, "role", None)
+    if role != "admin":
+        raise HTTPException(status_code=403, detail="Admin role required.")
+    try:
+        price = pg_db.get_credit_pricing(tenant_id)
+        return {"tenant_id": tenant_id, "price_per_credit": price}
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@app.put("/api/credits/admin/pricing/{tenant_id}")
+async def set_credit_pricing(tenant_id: str, req: SetPricingRequest, request: Request):
+    """Set a custom price per credit (INR) for a specific tenant (admin only).
+
+    Example: price_per_credit=6 means 1 credit costs ₹6 for that tenant.
+    Tenants cannot make calls if their balance is 0.
+    """
+    role = getattr(request.state, "role", None)
+    if role != "admin":
+        raise HTTPException(status_code=403, detail="Admin role required.")
+    try:
+        new_price = pg_db.set_credit_pricing(tenant_id, req.price_per_credit)
+        return {"tenant_id": tenant_id, "price_per_credit": new_price}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/api/credits/pricing")
+async def get_my_credit_pricing(request: Request):
+    """Get the price per credit (INR) for the authenticated tenant."""
+    tenant_id = getattr(request.state, "tenant_id", CLIENT_ID)
+    price = pg_db.get_credit_pricing(tenant_id)
+    return {"tenant_id": tenant_id, "price_per_credit": price}
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

@@ -167,8 +167,8 @@ export default function Dashboard() {
         <StatCard label="Failed" value={failed} />
         <StatCard
           label="Total Cost"
-          value={`$${totalCost >= 1000 ? (totalCost / 1000).toFixed(1) + 'k' : totalCost.toFixed(2)}`}
-          sub={totalCalls > 0 ? `Avg $${(totalCost / totalCalls).toFixed(2)}` : undefined}
+          value={`₹${totalCost >= 1000 ? (totalCost / 1000).toFixed(1) + 'k' : totalCost.toFixed(2)}`}
+          sub={totalCalls > 0 ? `Avg ₹${(totalCost / totalCalls).toFixed(2)}` : undefined}
         />
       </div>
 

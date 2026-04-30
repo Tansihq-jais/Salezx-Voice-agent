@@ -1,8 +1,0 @@
-Call SID : 41f16d717eb24ae6ee605d66a31d1a4o
-Time     : 2026-04-24T09:49:47.173521+00:00
-
-─── TRANSCRIPT ───────────────────────────────────────────
-Riya:Hello. Customer:Hello. Sunny. Haan ji, kaun? Hello. Hello. Riya:Hello sir, main Riya bol rahi hoon GrabYourCar se. Kya main Tanishq sir se baat kar rahi hoon? Customer:हां जी, कराइए। Riya:सर, आपने हाल ही में GrabYourCar से सर्विस ली थी — मैं बस यह जानना चाहती थी कि आपका ओवरऑल एक्सपीरियंस कैसा रहा? Customer:ओवरऑल एक्सपीरियंस तो काफी अच्छा था। आई कैन गिव फाइव स्टार रेटिंग। Riya:बहुत अच्छा लगा सुनकर! कोई खास चीज़ जो आपको बहुत पसंद आई — हमारी डिलीवरी, प्रोसेस, या टीम का बिहेवियर? Customer:हां, डिलीवरी काफी अच्छी थी एंड टीम भी काफी कोऑर्डिनेट थी। ऑलराइट, थैंक यू मच। Riya:थैंक यू सो मच सर! आपका फीडबैक हमारे लिए बहुत मायने रखता है। अगर कभी भी कोई ज़रूरत हो, तो ज़रूर बताइएगा। [[HANGUP]]
-
-─── COLLECTED INFO ───────────────────────────────────────
-LeadInfo(lead_id='', budget_min=None, budget_max=None, location=None, timeline=None, property_type=None, bhk=None, team_size=None, current_crm=None, pain_points=[], callback_time=None, demo_requested=False, notes=None)

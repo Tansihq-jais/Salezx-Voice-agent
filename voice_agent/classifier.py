@@ -7,11 +7,8 @@ from __future__ import annotations
 import asyncio
 import logging
 
-import lead_scorer  # used by insights_analyzer (imported here to ensure it's available)
-
 logger = logging.getLogger(__name__)
 
-# Keyword fallback map (used when Gemini is unavailable)
 KEYWORD_MAP = {
     "NOT_INTERESTED": "Cold",
     "DEMO_BOOKED": "Hot",
@@ -43,10 +40,7 @@ async def classify_and_analyze(
     lead_id: str,
     campaign_id: str = '',
 ) -> tuple[str, str, dict]:
-    """
-    Full LLM-powered analysis.
-    Returns (classification, summary, full_insights_dict).
-    """
+    """Full LLM-powered analysis. Returns (classification, summary, insights_dict)."""
     try:
         from insights_analyzer import analyze_call
         from call_insights import upsert_insight
@@ -66,6 +60,4 @@ async def classify_and_analyze(
 
     except Exception as e:
         logger.warning(f'LLM analysis failed for {lead_id}: {e} — using keyword fallback')
-        classification = classify_transcript(transcript)
-        summary = summarise_transcript(transcript)
-        return classification, summary, {}
+        return classify_transcript(transcript), summarise_transcript(transcript), {}

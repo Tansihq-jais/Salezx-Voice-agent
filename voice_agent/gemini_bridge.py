@@ -110,6 +110,12 @@ class GeminiBridge:
                 collected_info=self.collected_info,
             )
         _types = genai.types
+        # Re-read voice/language from config at session start so CLI overrides
+        # (which patch config.GEMINI_VOICE after module import) take effect.
+        import config as _cfg_live
+        _voice    = _cfg_live.GEMINI_VOICE
+        _language = _cfg_live.AGENT_LANGUAGE
+
         config = _types.LiveConnectConfig(
             response_modalities=["AUDIO"],
             system_instruction=_types.Content(
@@ -118,9 +124,9 @@ class GeminiBridge:
             ),
             speech_config=_types.SpeechConfig(
                 voice_config=_types.VoiceConfig(
-                    prebuilt_voice_config=_types.PrebuiltVoiceConfig(voice_name=GEMINI_VOICE)
+                    prebuilt_voice_config=_types.PrebuiltVoiceConfig(voice_name=_voice)
                 ),
-                language_code=AGENT_LANGUAGE,
+                language_code=_language,
             ),
             # Transcribe both agent output and customer input so transcripts are captured
             output_audio_transcription=_types.AudioTranscriptionConfig(),
@@ -251,7 +257,7 @@ class GeminiBridge:
                     if response.text:
                         text = response.text
                         logger.info(f"[{self.call_sid}] Agent: {text}")
-                        self.transcript_parts.append(f"Riya: {text}")
+                        self.transcript_parts.append(f"{AGENT_NAME}: {text}")
                         if self.lead_id:
                             chunk_info = extract_from_chunk(self.lead_id, text)
                             self._merge_info(chunk_info)
@@ -267,10 +273,10 @@ class GeminiBridge:
                         if getattr(sc, "output_transcription", None):
                             t = sc.output_transcription.text or ""
                             if t.strip():
-                                if self.transcript_parts and self.transcript_parts[-1].startswith("Riya:"):
+                                if self.transcript_parts and self.transcript_parts[-1].startswith(f"{AGENT_NAME}:"):
                                     self.transcript_parts[-1] += t
                                 else:
-                                    self.transcript_parts.append(f"Riya:{t}")
+                                    self.transcript_parts.append(f"{AGENT_NAME}:{t}")
                                 # Detect hangup from transcription (primary path in AUDIO-only mode)
                                 if "[[HANGUP]]" in t:
                                     logger.info(f"[{self.call_sid}] Hangup signal detected in transcription — ending call")

@@ -1,13 +1,9 @@
 """
 lead_info.py — MongoDB-backed real-time lead data extracted during calls.
 
-Public API (unchanged):
+Public API:
   upsert(info: LeadInfo) -> None
   get(lead_id: str) -> LeadInfo | None
-
-LeadInfo fields are extracted live during the call by extractor.py and
-stored here so the agent can reference them across call sessions and
-the CRM can read them directly from MongoDB.
 """
 from __future__ import annotations
 
@@ -46,16 +42,15 @@ def _col():
 def upsert(info: LeadInfo) -> None:
     """Insert or update a LeadInfo record. Only overwrites non-None fields."""
     d = asdict(info)
-    # Build $set only for fields that have a real value (don't overwrite with None)
     updates: dict = {"updated_at": datetime.now(timezone.utc)}
     for key, val in d.items():
         if key == "lead_id":
             continue
         if key == "pain_points":
-            if val:  # only overwrite if we actually extracted something
+            if val:
                 updates[key] = val
         elif key == "demo_requested":
-            if val:  # only set True, never overwrite True with False
+            if val:
                 updates[key] = True
         elif val is not None:
             updates[key] = val

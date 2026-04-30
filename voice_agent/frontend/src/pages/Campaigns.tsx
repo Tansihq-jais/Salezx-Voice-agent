@@ -167,7 +167,7 @@ export default function Campaigns() {
           <div className="flex items-start justify-between">
             <div>
               <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Total Spend</p>
-              <p className="mt-2 text-3xl font-bold text-[#C84B0C]">${totalSpend.toFixed(2)}</p>
+              <p className="mt-2 text-3xl font-bold text-[#C84B0C]">₹{totalSpend.toFixed(2)}</p>
               <p className="mt-1 text-xs text-gray-400">All time</p>
             </div>
             <span className="rounded-full bg-red-50 px-2.5 py-1 text-[10px] font-bold text-red-500 uppercase tracking-wide">Budget</span>
@@ -243,7 +243,7 @@ export default function Campaigns() {
                         </td>
                         <td className="px-4 py-3.5 text-right text-sm text-gray-700">{total.toLocaleString()}</td>
                         <td className="px-4 py-3.5 text-right text-sm text-gray-700">{completed.toLocaleString()}</td>
-                        <td className="px-4 py-3.5 text-right text-sm font-semibold text-[#C84B0C]">${cost.toFixed(2)}</td>
+                        <td className="px-4 py-3.5 text-right text-sm font-semibold text-[#C84B0C]">₹{cost.toFixed(2)}</td>
                         <td className="px-4 py-3.5 text-right text-sm text-gray-500">{createdDate}</td>
                         <td className="px-4 py-3.5 text-center" onClick={(e) => e.stopPropagation()}>
                           <button className="p-1.5 rounded-lg text-gray-400 hover:bg-gray-100 hover:text-gray-600 transition-colors">

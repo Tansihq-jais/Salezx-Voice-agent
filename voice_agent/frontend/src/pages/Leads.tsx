@@ -151,7 +151,7 @@ export default function Leads() {
             </div>
           </div>
           <p className="mt-3 text-2xl font-bold text-gray-900">
-            {activePipelineValue > 0 ? `$${activePipelineValue.toLocaleString()}` : '—'}
+            {activePipelineValue > 0 ? `₹${activePipelineValue.toLocaleString()}` : '—'}
           </p>
           <p className="mt-0.5 text-xs text-gray-400">Total projected value from {allLeads.length} active leads</p>
         </div>
@@ -263,7 +263,7 @@ export default function Leads() {
                       </td>
                       <td className="px-4 py-3.5 text-right">
                         <span className="text-sm font-semibold text-gray-900">
-                          {lead.value ? `$${lead.value.toLocaleString()}` : '—'}
+                          {lead.value ? `₹${lead.value.toLocaleString()}` : '—'}
                         </span>
                       </td>
                       <td className="px-4 py-3.5">

@@ -240,7 +240,8 @@ class TerminalBridge(GeminiBridge):
                     if response.text:
                         text = response.text
                         logger.info(f"[{self.call_sid}] Agent: {text}")
-                        self.transcript_parts.append(f"Riya: {text}")
+                        import config as _cfg
+                        self.transcript_parts.append(f"{_cfg.AGENT_NAME}: {text}")
                         if "[[HANGUP]]" in text:
                             self.on_hangup.set()
 
@@ -249,10 +250,11 @@ class TerminalBridge(GeminiBridge):
                         if getattr(sc, "output_transcription", None):
                             t = sc.output_transcription.text or ""
                             if t.strip():
-                                if self.transcript_parts and self.transcript_parts[-1].startswith("Riya"):
+                                import config as _cfg
+                                if self.transcript_parts and self.transcript_parts[-1].startswith(_cfg.AGENT_NAME):
                                     self.transcript_parts[-1] += t
                                 else:
-                                    self.transcript_parts.append(f"Riya:{t}")
+                                    self.transcript_parts.append(f"{_cfg.AGENT_NAME}:{t}")
                                 if "[[HANGUP]]" in t:
                                     self.on_hangup.set()
                                 closing = ["dhanyawad","shukriya","aapka din achha rahe",
@@ -343,14 +345,15 @@ def make_mic_callback(mic_queue: asyncio.Queue, loop: asyncio.AbstractEventLoop,
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def transcript_watcher(bridge: TerminalBridge, stop_event: asyncio.Event):
+    import config as _cfg
     last_len = 0
     while not stop_event.is_set():
         current = bridge.transcript_parts
         if len(current) > last_len:
             for part in current[last_len:]:
-                if part.startswith("Riya"):
+                if part.startswith(_cfg.AGENT_NAME):
                     text = part.split(":", 1)[-1].strip()
-                    print(f"\n{_CYAN}{_BOLD}🤖 Riya:{_RESET} {_CYAN}{text}{_RESET}", flush=True)
+                    print(f"\n{_CYAN}{_BOLD}🤖 {_cfg.AGENT_NAME}:{_RESET} {_CYAN}{text}{_RESET}", flush=True)
                 elif part.startswith("Customer:"):
                     text = part.split(":", 1)[-1].strip()
                     print(f"\n{_GREEN}{_BOLD}🎤 You:{_RESET}  {_GREEN}{text}{_RESET}", flush=True)
@@ -495,14 +498,15 @@ async def run_session(prompt_type: PromptType, lead_name: str, send_greeting: bo
             print(f"{_YELLOW}failed — {e}{_RESET}")
 
     # ── Full transcript ───────────────────────────────────────────────────────
+    import config as _cfg
     print(f"\n{_BOLD}{'─'*60}{_RESET}")
     print(f"{_BOLD}  Full Transcript{_RESET}")
     print(f"{_BOLD}{'─'*60}{_RESET}")
     if bridge.transcript_parts:
         for part in bridge.transcript_parts:
-            if part.startswith("Riya"):
+            if part.startswith(_cfg.AGENT_NAME):
                 text = part.split(":", 1)[-1].strip()
-                print(f"{_CYAN}Riya   :{_RESET} {text}")
+                print(f"{_CYAN}{_cfg.AGENT_NAME}   :{_RESET} {text}")
             else:
                 text = part.split(":", 1)[-1].strip()
                 print(f"{_GREEN}You    :{_RESET} {text}")

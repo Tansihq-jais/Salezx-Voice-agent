@@ -17,6 +17,8 @@ from outbound import make_outbound_call
 from classifier import classify_and_analyze
 from config import CLIENT_ID, MIN_CONNECTION_RATE
 from scheduler import CallingWindowChecker
+import credit_service
+from credit_service import InsufficientCreditsError
 
 logger = logging.getLogger(__name__)
 
@@ -124,8 +126,18 @@ class CampaignOrchestratorPG:
     async def _dial_lead(self, lead_dict: dict, sem: asyncio.Semaphore, campaign: dict) -> None:
         """Dial a single lead with timeout and retry; always release the semaphore."""
         lead_id = lead_dict["lead_id"]
+        campaign_id = campaign["campaign_id"]
         try:
             async with asyncio.timeout(300):
+                # Requirements 3.3, 3.4 — credit gate before dialling.
+                # Step 1: Check balance first (chicken-and-egg: we need the call_sid
+                # to reserve, but we don't have it until after the call is placed).
+                balance = credit_service.get_balance(CLIENT_ID)
+                if balance == 0:
+                    raise InsufficientCreditsError(
+                        f"Tenant '{CLIENT_ID}' has insufficient credits."
+                    )
+
                 pg_db.update_contact_status(lead_id, LeadStatus.DIALING.value)
                 
                 # Exponential backoff retry (3 attempts)
@@ -138,9 +150,27 @@ class CampaignOrchestratorPG:
                             lead_name=lead_dict["name"],
                             lead_company=lead_dict["company"],
                         )
-                        call_sid = result.get("Call", {}).get("Sid")
-                        if call_sid:
+                        call_sid = result.get("call_sid") or result.get("Call", {}).get("Sid")
+                        if call_sid and call_sid != "unknown":
                             pg_db.update_contact_call_sid(lead_id, call_sid)
+                            # Step 2: Reserve 1 credit using the real call_sid.
+                            # Slightly racy (balance could drop to 0 between check and
+                            # reserve) but acceptable — check_and_reserve will raise
+                            # InsufficientCreditsError if another concurrent call consumed
+                            # the last credit.
+                            try:
+                                credit_service.check_and_reserve(CLIENT_ID, call_sid)
+                            except InsufficientCreditsError:
+                                # Balance was consumed between check and reserve — log but
+                                # don't fail the call since it's already been placed.
+                                logger.warning(
+                                    "Credits exhausted between balance check and reserve for "
+                                    "call_sid=%r — call already placed, continuing",
+                                    call_sid,
+                                )
+                            except credit_service.DuplicateReservationError:
+                                # Already reserved (shouldn't happen for a fresh call_sid).
+                                pass
                         last_exc = None
                         break
                     except Exception as exc:
@@ -159,6 +189,20 @@ class CampaignOrchestratorPG:
             pg_db.update_contact_call_result(
                 lead_id, LeadStatus.FAILED.value, error="Call timed out"
             )
+        except InsufficientCreditsError:
+            # Requirements 3.3, 3.4 — pause campaign and emit credits_exhausted event.
+            logger.warning(
+                "Insufficient credits for lead %s in campaign %s — pausing campaign",
+                lead_id, campaign_id,
+            )
+            pg_db.update_contact_status(lead_id, LeadStatus.CANCELLED.value)
+            self._pause_event.clear()
+            pg_db.update_campaign_status(campaign_id, CampaignStatus.PAUSED.value)
+            event_bus.bus.publish(CLIENT_ID, {
+                "type": "credits_exhausted",
+                "tenant_id": CLIENT_ID,
+                "campaign_id": campaign_id,
+            })
         except Exception as exc:
             logger.exception("Failed to dial lead %s: %s", lead_id, exc)
             pg_db.update_contact_call_result(
@@ -341,19 +385,13 @@ class CampaignOrchestratorPG:
         else:
             logger.debug("Unhandled Exotel status '%s' for call_sid %s", status, call_sid)
 
-        # Persist billing record after every call with a duration
-        if duration > 0:
-            try:
-                from billing import record_call
-                record_call(
-                    lead_id=lead_id,
-                    campaign_id=lead["campaign_id"],
-                    duration_seconds=duration,
-                    lead_name=lead["name"] or "",
-                    lead_phone=lead["phone"] or "",
-                )
-            except Exception as exc:
-                logger.error("Failed to record billing for lead %s: %s", lead_id, exc)
+        # Requirements 4.2, 4.3 — finalise credit deduction for this call.
+        try:
+            credit_service.finalize_call(CLIENT_ID, call_sid, duration)
+        except Exception as exc:
+            logger.warning(
+                "credit_service.finalize_call failed for call_sid=%r: %s", call_sid, exc
+            )
 
     # ------------------------------------------------------------------
     # Results CSV

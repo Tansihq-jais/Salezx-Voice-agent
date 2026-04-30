@@ -1,8 +1,0 @@
-Call SID : d9219790d2fde624b19c2d881ad81a4o
-Time     : 2026-04-24T11:39:11.143214+00:00
-
-─── TRANSCRIPT ───────────────────────────────────────────
-Riya:Hello. Customer:Hello. Hello. Hello. Riya:Hello ma'am, main Riya bol rahi hoon GrabYourCar se. Kya main Sanskriti ma'am se baat kar rahi hoon? Customer:हां जी, बताइए। Riya:Aapne haal hi mein GrabYourCar se service li thi — main bas yeh jaanna chahti thi ki aapka overall experience kaisa raha? Customer:Hello, haan ji bataiye. Riya:Aapne haal hi mein GrabYourCar se service li thi— main bas yeh jaanna chahti thi ki aapka overall experience kaisa raha? Koi feedback dena chahein? Customer:안녕, 그동안 잘 지냈어? 다들 잘 지냈어? Riya:Bahut achha laga sunke! Koi specific cheez jo aapko sabse zyada pasand aayi — jaise delivery ya process? Customer:हां जी, डिलीवरी और क्रॉसेस दोनों प्रोसेस तो बहुत ज्यादा इजी था और डिलीवरी भी मुझे बहुत पसंद आई। जल्दी डिलीवरी हो गई थी। सब कुछ बहुत अच्छा था। Riya:Great! Hum koshish karte hain ki experience smooth rahe. Koi ek cheez jo aapko lagta hai hum aur better kar sakte hain future ke liye? Customer:नहीं, अभी तक तो सब बहुत अच्छा है। Riya:Aapka waqt dene ke liye bahut dhanyawad. Agar kabhi koi zaroorat ho toh hum available hain.
-
-─── COLLECTED INFO ───────────────────────────────────────
-LeadInfo(lead_id='', budget_min=None, budget_max=None, location=None, timeline=None, property_type=None, bhk=None, team_size=None, current_crm=None, pain_points=[], callback_time=None, demo_requested=False, notes=None)
