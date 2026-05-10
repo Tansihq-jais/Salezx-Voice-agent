@@ -109,7 +109,7 @@ npm run dev
 | `DATABASE_URL` | PostgreSQL connection string (Neon) | Yes |
 | `CLIENT_ID` | Tenant identifier for this deployment | Yes |
 | `PUBLIC_URL` | Publicly accessible URL of this server | Yes |
-| `AGENT_NAME` | AI agent's name (default: `Tanishq`) | No |
+| `AGENT_NAME` | AI agent's name (default: `Riya`) | No |
 | `COMPANY_NAME` | Company name shown in UI | No |
 | `PRODUCT_NAME` | Product name used in prompts | No |
 | `AGENT_LANGUAGE` | BCP-47 language tag (default: `hi-IN`) | No |

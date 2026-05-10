@@ -179,6 +179,7 @@ async def exoml(
     call_context: str = "",
     prompt_type: str = "sales",
     outbound: str = "false",
+    org_id: str = "",
 ):
     # Parse CustomField if present
     custom_field = request.query_params.get("CustomField", "")
@@ -190,6 +191,12 @@ async def exoml(
         call_context = parsed.get("call_context", [call_context])[0]
         prompt_type  = parsed.get("prompt_type",  [prompt_type])[0]
         outbound     = parsed.get("outbound",     [outbound])[0]
+        org_id       = parsed.get("org_id",       [org_id])[0]
+
+    # Resolve org config — use tenant_id from auth if no explicit org_id
+    if not org_id:
+        org_id = getattr(request.state, "tenant_id", CLIENT_ID)
+    resolved_org_config = _org_config_mod.get_org_config(org_id) if org_id else None
 
     # Store params keyed by CallSid so the WS handler can look them up reliably
     call_sid = request.query_params.get("CallSid", "")
@@ -201,9 +208,6 @@ async def exoml(
         is_outbound = outbound.lower() == "true"
         outbound_intro = build_outbound_intro(lead_name, prompt_type) if is_outbound else None
 
-        # Start Gemini session NOW — we have all params and the customer hasn't picked up yet.
-        # Send the greeting trigger immediately so Gemini generates audio while phone is ringing.
-        # Audio buffers in output_queue until _on_start fires and the sender starts consuming it.
         try:
             bridge = GeminiBridge(
                 call_sid=call_sid,
@@ -212,21 +216,21 @@ async def exoml(
                 call_context=call_context,
                 outbound_intro=outbound_intro,
                 prompt_type=prompt_type,
+                org_config=resolved_org_config,
             )
             await bridge.start(send_greeting=False)
 
-            # Send trigger now — audio will be ready before customer picks up
             if outbound_intro:
                 trigger = (
                     f"IMPORTANT: The lead's name is {lead_name!r}. Call type: {prompt_type}.\n"
-                    f"Say exactly and only: \"{outbound_intro}\" — nothing else."
+                    f"Say exactly and only: \"{outbound_intro}\" — nothing else. Wait for the customer to respond before saying anything more."
                 )
             else:
-                trigger = f"IMPORTANT: The lead's name is {lead_name!r}. Call type: {prompt_type}. Begin immediately."
+                trigger = f"IMPORTANT: The lead's name is {lead_name!r}. Call type: {prompt_type}. Say exactly and only: \"Hello.\" — nothing else. Wait for the customer to respond."
             await bridge._session.send_realtime_input(text=trigger)
 
             call_store.store_bridge(call_sid, bridge)
-            logger.info(f"[{call_sid}] Gemini session pre-started + greeting triggered: lead={lead_name!r}, prompt_type={prompt_type!r}")
+            logger.info(f"[{call_sid}] Gemini session pre-started + greeting triggered: lead={lead_name!r}, prompt_type={prompt_type!r}, org_id={org_id!r}")
         except Exception as e:
             logger.error(f"[{call_sid}] Failed to pre-start Gemini session: {e}")
             call_store.store(call_sid, {
@@ -1471,6 +1475,87 @@ async def update_settings(req: UpdateSettingsRequest):
             pass
 
     return {"success": True, "message": "Settings saved"}
+
+
+# ── Org Config API ────────────────────────────────────────────────────────────
+# Temporary in-memory multi-tenant org store.
+# Each org is identified by a unique org_id (string).
+# All fields are optional — missing fields fall back to global config defaults.
+
+import org_config as _org_config_mod
+from org_config import ORG_CONFIG_FIELDS
+
+
+class OrgConfigRequest(BaseModel):
+    org_id: str
+    agent_name: str = ""
+    company_name: str = ""
+    product_name: str = ""
+    agent_language: str = ""
+    gemini_voice: str = ""
+    gemini_speaking_rate: float = 0.0
+    business_type: str = ""
+    operating_city: str = ""
+    company_email: str = ""
+    company_legal_name: str = ""
+    industry_experience: str = ""
+    sales_manager_name: str = ""
+    product_restrictions: str = ""
+    business_context: str = ""
+    opening_question: str = ""
+    qualify_questions: str = ""
+    pitch_lines: str = ""
+    calling_window_start: str = ""
+    calling_window_end: str = ""
+    calling_window_tz: str = ""
+    min_connection_rate: float = 0.0
+
+
+@app.post("/api/orgs")
+async def create_org(req: OrgConfigRequest, request: Request):
+    """Register a new organisation with its agent/business config."""
+    data = {k: v for k, v in req.dict().items() if k != "org_id" and v not in ("", 0.0)}
+    result = _org_config_mod.upsert_org_config(req.org_id, data)
+    return {"success": True, "org_id": req.org_id, "config": result}
+
+
+@app.get("/api/orgs")
+async def list_orgs(request: Request):
+    """List all registered organisations."""
+    return {"success": True, "orgs": _org_config_mod.list_orgs()}
+
+
+@app.get("/api/orgs/{org_id}")
+async def get_org(org_id: str, request: Request):
+    """Get the merged config for an org (org values + global defaults)."""
+    raw = _org_config_mod.get_raw_org(org_id)
+    if raw is None:
+        raise HTTPException(status_code=404, detail=f"Org '{org_id}' not found")
+    merged = _org_config_mod.get_org_config(org_id)
+    return {"success": True, "org_id": org_id, "stored": raw, "effective": merged}
+
+
+@app.put("/api/orgs/{org_id}")
+async def update_org(org_id: str, req: OrgConfigRequest, request: Request):
+    """Update an existing org's config (partial update — only provided fields are changed)."""
+    data = {k: v for k, v in req.dict().items() if k != "org_id" and v not in ("", 0.0)}
+    result = _org_config_mod.upsert_org_config(org_id, data)
+    return {"success": True, "org_id": org_id, "config": result}
+
+
+@app.delete("/api/orgs/{org_id}")
+async def delete_org(org_id: str, request: Request):
+    """Remove an org's config from the store."""
+    existed = _org_config_mod.delete_org(org_id)
+    if not existed:
+        raise HTTPException(status_code=404, detail=f"Org '{org_id}' not found")
+    return {"success": True, "org_id": org_id, "message": "Org deleted"}
+
+
+@app.get("/api/orgs/{org_id}/fields")
+async def get_org_fields(request: Request):
+    """Return the list of configurable org fields."""
+    return {"success": True, "fields": ORG_CONFIG_FIELDS}
 
 
 # ── Credits API ───────────────────────────────────────────────────────────────
