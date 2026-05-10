@@ -53,6 +53,7 @@ class GeminiBridge:
         outbound_intro: Optional[str] = None,
         initial_info: Optional[LeadInfo] = None,
         prompt_type: "PromptType" = "sales",
+        org_config: Optional[dict] = None,
     ):
         self.call_sid       = call_sid
         self.lead_id        = lead_id
@@ -61,6 +62,7 @@ class GeminiBridge:
         self.call_context   = call_context
         self.outbound_intro = outbound_intro
         self.prompt_type    = prompt_type
+        self.org_config     = org_config
 
         # Live collected info — updated as transcript chunks arrive
         self.collected_info: LeadInfo = initial_info or LeadInfo(lead_id=lead_id)
@@ -100,6 +102,7 @@ class GeminiBridge:
             system_prompt = build_system_prompt(
                 prompt_type=self.prompt_type,
                 lead_name="there",
+                org_config=self.org_config,
             )
         else:
             system_prompt = build_system_prompt(
@@ -108,6 +111,7 @@ class GeminiBridge:
                 lead_company=self.lead_company,
                 call_context=self.call_context,
                 collected_info=self.collected_info,
+                org_config=self.org_config,
             )
         _types = genai.types
         # Re-read voice/language from config at session start so CLI overrides
@@ -164,13 +168,9 @@ class GeminiBridge:
 
         if send_greeting:
             if self.outbound_intro:
-                msg = f"(Start the call. Say exactly: {self.outbound_intro})"
+                msg = f"(Start the call. Say exactly and only: \"{self.outbound_intro}\" — nothing else. Wait for the customer to respond before saying anything more.)"
             else:
-                import config as _cfg
-                msg = (
-                    f"(Greet the caller warmly and introduce yourself as {_cfg.AGENT_NAME} "
-                    f"from {_cfg.COMPANY_NAME}. Ask how you can help them today.)"
-                )
+                msg = "(Start the call. Say exactly and only: \"Hello.\" — nothing else. Wait for the customer to respond before saying anything more.)"
             logger.info(f"[{self.call_sid}] Sending greeting to Gemini...")
             await self._session.send_realtime_input(text=msg)
 
